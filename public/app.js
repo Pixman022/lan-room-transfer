@@ -9,8 +9,7 @@ const MAX_FILES = 20;
 const $ = id => document.getElementById(id);
 const state = {
   ws: null, code: '', id: '', token: '', leaving: false, peers: new Map(),
-  outbound: new Map(), offers: new Map(), jobs: [], queue: [], active: null,
-  selectedRecipient: null, dropTarget: null, recentFiles: [],
+  outbound: new Map(), ownOffers: [], offers: new Map(), jobs: [], queue: [], active: null,
 };
 
 let currentDeviceName;
@@ -109,7 +108,8 @@ function connect(action) {
     showRoom(false);
     renderPeers();
     if (!state.leaving) feedback('协调服务已断开，可尝试恢复房间会话', true);
-    state.code = ''; state.selectedRecipient = null; state.dropTarget = null;
+    state.code = ''; state.ownOffers = []; state.outbound.clear(); state.offers.clear();
+    renderSentFiles(); renderRequests();
   });
   ws.addEventListener('error', () => feedback('无法连接协调服务，请检查地址与网络', true));
 }
@@ -138,7 +138,8 @@ async function handleServer(msg) {
       const peer = state.peers.get(msg.id);
       if (peer) { peer.pc.close(); state.peers.delete(msg.id); }
       if (state.active?.peerId === msg.id) failActive('发送设备已离线');
-      renderPeers(); break;
+      discardPeerOffers(msg.id);
+      renderPeers(); renderRequests(); renderJobs(); break;
     }
     case 'peer-name': {
       const peer = state.peers.get(msg.id);
@@ -155,7 +156,7 @@ async function createPeer(id, name, initiator) {
   if (state.peers.has(id)) return state.peers.get(id);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, pc, channel: null, verified: false, remoteReady: false,
-    ready: false, reason: '正在建立连接', candidates: [], sending: new Map() };
+    ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set() };
   state.peers.set(id, peer);
   pc.onicecandidate = event => {
     if (!event.candidate) return;
@@ -219,6 +220,7 @@ function attachChannel(peer, channel) {
         peer.verified = true;
         channel.send(JSON.stringify({ kind: 'ready' }));
         peer.ready = peer.remoteReady;
+        syncSharedOffers(peer);
         renderPeers();
         return;
       }
@@ -242,6 +244,7 @@ async function receiveChannel(peer, data) {
   if (msg.kind === 'ready') {
     peer.remoteReady = true;
     peer.ready = peer.verified;
+    syncSharedOffers(peer);
     renderPeers();
     return;
   }
@@ -255,7 +258,11 @@ async function receiveChannel(peer, data) {
     state.offers.set(key, { peerId: peer.id, offerId: msg.offerId,
       files: msg.files.map(f => ({ id: f.id, name: f.name, size: f.size, status: 'pending' })) });
     renderRequests();
-    feedback(`收到来自 ${peer.name} 的 ${msg.files.length} 个文件请求`);
+    feedback(`${peer.name} 分享了 ${msg.files.length} 个文件`);
+  } else if (msg.kind === 'file-withdraw') {
+    if (typeof msg.offerId === 'string' && typeof msg.fileId === 'string') {
+      withdrawPeerFile(peer.id, msg.offerId, msg.fileId);
+    }
   } else if (msg.kind === 'request-file') {
     void startSendingFile(peer, msg);
   } else if (msg.kind === 'cancel-file') {
@@ -383,66 +390,19 @@ function retryJob(job) {
   state.queue.push(job); renderJobs(); renderRequests(); startNext();
 }
 
-function renderPeers() {
-  const list = $('peer-list');
-  list.replaceChildren();
-  const peers = [...state.peers.values()];
-  const available = peers.filter(p => p.ready);
-  $('device-count').textContent = `${available.length} 台可用`;
-  if (!available.some(p => p.id === state.dropTarget)) {
-    state.dropTarget = available.length === 1 ? available[0].id : null;
-  }
-  if (!peers.length) list.append(elem('p', 'empty', '暂无其他设备'));
-  for (const peer of peers) {
-    const selected = state.dropTarget === peer.id;
-    const row = elem('div', selected ? 'device-row is-selected' : 'device-row');
-    if (peer.ready) {
-      row.role = 'button';
-      row.tabIndex = 0;
-      row.setAttribute('aria-label', `选择 ${peer.name} 作为接收设备`);
-      row.setAttribute('aria-pressed', String(selected));
-      row.addEventListener('click', () => selectDropTarget(peer.id));
-      row.addEventListener('keydown', event => {
-        if (event.target === row && (event.key === 'Enter' || event.key === ' ')) {
-          event.preventDefault();
-          selectDropTarget(peer.id);
-        }
-      });
+// File objects remain in the uploader's browser; the signalling server stores none.
+// Each verified peer gets the current room file catalog, including later joiners.
+function syncSharedOffers(peer) {
+  if (!peer?.ready) return;
+  for (const offer of state.ownOffers) {
+    if (peer.syncedOffers.has(offer.offerId)) continue;
+    if (sendPeer(peer, { kind: 'file-list', offerId: offer.offerId, files: offer.files })) {
+      peer.syncedOffers.add(offer.offerId);
     }
-    row.append(elem('div', 'device-icon', deviceAvatar(peer.name)));
-    const info = elem('div', 'item-info');
-    info.append(elem('strong', '', peer.name), elem('span', '', peer.ready ? '已连接' : peer.reason));
-    row.append(info);
-    const button = addButton(row, peer.ready ? '发送文件' : '不可用', () => chooseFilesFor(peer.id),
-      peer.ready ? 'secondary small-button' : 'quiet-button small-button');
-    button.addEventListener('click', event => event.stopPropagation());
-    button.disabled = !peer.ready;
-    list.append(row);
   }
-  renderDropTarget();
 }
-function renderDropTarget() {
-  const peer = state.peers.get(state.dropTarget);
-  $('drop-target').textContent = peer?.ready ? `发送给 ${peer.name}` : '请先选择左侧设备';
-}
-function selectDropTarget(peerId) {
-  if (!state.peers.get(peerId)?.ready) return;
-  state.dropTarget = peerId;
-  renderPeers();
-}
-function chooseFilesFor(peerId) {
-  const peer = state.peers.get(peerId);
-  if (!peer?.ready) { feedback('该设备尚未建立可用的局域网文件连接', true); return; }
-  state.dropTarget = peerId;
-  state.selectedRecipient = peerId;
-  renderPeers();
-  const picker = $('send-files');
-  picker.value = '';
-  picker.click();
-}
-function offerFiles(peerId, files) {
-  const peer = state.peers.get(peerId);
-  if (!peer?.ready) { feedback('对方连接已断开，请重新选择设备', true); return; }
+function shareFiles(files) {
+  if (!state.code) { feedback('请先进入房间', true); return; }
   if (!files.length || files.length > MAX_FILES) { feedback('一次请选择 1–20 个文件', true); return; }
   if (files.some(file => file.size > MAX_FILE_BYTES)) { feedback('技术原型每个文件最大 32 MB', true); return; }
   const offerId = crypto.randomUUID();
@@ -451,42 +411,96 @@ function offerFiles(peerId, files) {
     const id = crypto.randomUUID(); fileMap.set(id, file);
     return { id, name: file.name, size: file.size };
   });
-  if (!sendPeer(peer, { kind: 'file-list', offerId, files: metadata })) { feedback('文件通道暂不可用', true); return; }
   state.outbound.set(offerId, fileMap);
-  state.recentFiles = metadata;
+  state.ownOffers.push({ offerId, files: metadata });
+  for (const peer of state.peers.values()) syncSharedOffers(peer);
   renderSentFiles();
-  feedback(`已向 ${peer.name} 发送 ${files.length} 个文件的清单，等待对方选择接收`);
+  feedback('已共享到房间');
+}
+function withdrawSharedFile(offerId, fileId) {
+  const offer = state.ownOffers.find(item => item.offerId === offerId);
+  if (!offer || !offer.files.some(file => file.id === fileId)) return;
+  offer.files = offer.files.filter(file => file.id !== fileId);
+  const fileMap = state.outbound.get(offerId);
+  fileMap?.delete(fileId);
+  for (const peer of state.peers.values()) {
+    peer.sending.get(fileId)?.cancel();
+    sendPeer(peer, { kind: 'file-withdraw', offerId, fileId });
+  }
+  if (!offer.files.length) {
+    state.ownOffers = state.ownOffers.filter(item => item !== offer);
+    state.outbound.delete(offerId);
+  }
+  renderSentFiles();
+}
+function withdrawPeerFile(peerId, offerId, fileId) {
+  const key = `${peerId}:${offerId}`;
+  const offer = state.offers.get(key);
+  if (!offer) return;
+  offer.files = offer.files.filter(file => file.id !== fileId);
+  if (!offer.files.length) state.offers.delete(key);
+  if (state.active?.peerId === peerId && state.active?.fileId === fileId) finishJob('已撤回');
+  for (const job of state.queue.filter(job => job.peerId === peerId && job.fileId === fileId)) {
+    job.status = '已撤回';
+  }
+  state.queue = state.queue.filter(job => !(job.peerId === peerId && job.fileId === fileId));
+  renderRequests(); renderJobs();
+}
+function discardPeerOffers(peerId) {
+  for (const [key, offer] of state.offers) {
+    if (offer.peerId === peerId) state.offers.delete(key);
+  }
+  for (const job of state.queue.filter(job => job.peerId === peerId)) job.status = '发送设备已离线';
+  state.queue = state.queue.filter(job => job.peerId !== peerId);
+}
+function renderPeers() {
+  const list = $('peer-list');
+  list.replaceChildren();
+  const peers = [...state.peers.values()];
+  $('device-count').textContent = `${peers.length} 台`;
+  if (!peers.length) list.append(elem('p', 'empty', '暂无其他设备'));
+  for (const peer of peers) {
+    const row = elem('div', 'device-row');
+    row.append(elem('div', 'device-icon', deviceAvatar(peer.name)));
+    const info = elem('div', 'item-info');
+    info.append(elem('strong', '', peer.name), elem('span', '', peer.ready ? '已连接' : peer.reason));
+    row.append(info);
+    list.append(row);
+  }
 }
 function renderSentFiles() {
   const container = $('sent-files');
   container.replaceChildren();
-  container.hidden = state.recentFiles.length === 0;
-  for (const file of state.recentFiles.slice(0, 4)) {
+  const shared = state.ownOffers.flatMap(offer => offer.files.map(file => ({ ...file, offerId: offer.offerId })));
+  container.hidden = shared.length === 0;
+  for (const file of shared.slice().reverse()) {
     const line = elem('div', 'file-row');
     line.append(elem('span', 'file-icon', '↑'));
     const info = elem('div', 'item-info');
-    info.append(elem('strong', '', file.name), elem('span', '', `${humanSize(file.size)} · 已发送清单`));
-    line.append(info); container.append(line);
-  }
-  if (state.recentFiles.length > 4) {
-    container.append(elem('p', 'empty', `还有 ${state.recentFiles.length - 4} 个文件`));
+    info.append(elem('strong', '', file.name), elem('span', '', `${humanSize(file.size)} · 已共享`));
+    line.append(info);
+    addButton(line, '移除', () => withdrawSharedFile(file.offerId, file.id), 'quiet-button small-button');
+    container.append(line);
   }
 }
 function renderRequests() {
   const root = $('incoming-requests'); root.replaceChildren();
   const offers = [...state.offers.values()];
-  $('request-count').textContent = `${offers.length} 个请求`;
+  $('request-count').textContent = `${offers.reduce((total, offer) => total + offer.files.length, 0)} 个文件`;
   if (!offers.length) { root.append(elem('p', 'empty', '暂无文件')); return; }
   for (const offer of offers) {
     const peer = state.peers.get(offer.peerId);
     const box = elem('div', 'request'); const top = elem('div', 'request-head');
-    top.append(elem('strong', '', `来自 ${peer?.name ?? '已离线设备'}`), elem('small', '', `${offer.files.length} 个文件`));
+    top.append(elem('strong', '', peer?.name ?? '已离线设备'), elem('small', '', `${offer.files.length} 个文件`));
     box.append(top);
     for (const file of offer.files) {
       const line = elem('div', 'file-row'); line.append(elem('div', 'file-icon', '↧'));
       const info = elem('div', 'item-info'); info.append(elem('strong', '', file.name), elem('span', '', humanSize(file.size)));
       line.append(info);
-      if (file.status === 'pending') addButton(line, '接收', () => acceptFile(offer, file));
+      if (file.status === 'pending') {
+        const button = addButton(line, '接收', () => acceptFile(offer, file));
+        button.disabled = !peer?.ready;
+      }
       else line.append(elem('span', file.status === 'complete' ? 'chip ready' : 'chip',
         ({ queued: '已加入队列', complete: '已接收', failed: '可在队列重试' })[file.status] || file.status));
       box.append(line);
@@ -494,7 +508,8 @@ function renderRequests() {
     const pending = offer.files.filter(f => f.status === 'pending');
     if (pending.length) {
       const foot = elem('div', 'request-footer');
-      addButton(foot, `接收全部 (${pending.length})`, () => pending.forEach(f => acceptFile(offer, f)), 'primary small-button');
+      const button = addButton(foot, `接收全部 (${pending.length})`, () => pending.forEach(f => acceptFile(offer, f)), 'primary small-button');
+      button.disabled = !peer?.ready;
       box.append(foot);
     }
     root.append(box);
@@ -591,16 +606,17 @@ $('leave-room').onclick = () => {
   sessionStorage.removeItem('lan-room-session');
   for (const job of state.jobs) if (job.url) URL.revokeObjectURL(job.url);
   state.jobs = []; state.queue = []; state.active = null; state.offers.clear(); state.outbound.clear();
-  state.recentFiles = [];
+  state.ownOffers = [];
   state.ws?.close(); state.ws = null;
   for (const peer of state.peers.values()) peer.pc.close(); state.peers.clear();
-  state.code = ''; state.selectedRecipient = null; state.dropTarget = null;
+  state.code = '';
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };
 $('copy-code').onclick = async () => { try { await navigator.clipboard.writeText(state.code); feedback('房间码已复制'); } catch { feedback(`房间码：${state.code}`); } };
 $('drop-zone').addEventListener('click', () => {
-  if (!state.dropTarget) { feedback('请先选择在线设备', true); return; }
-  chooseFilesFor(state.dropTarget);
+  const picker = $('send-files');
+  picker.value = '';
+  picker.click();
 });
 const dropZone = $('drop-zone');
 dropZone.addEventListener('dragover', event => {
@@ -612,16 +628,13 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('is-drago
 dropZone.addEventListener('drop', event => {
   event.preventDefault();
   dropZone.classList.remove('is-dragover');
-  if (!state.dropTarget) { feedback('请先选择在线设备', true); return; }
   const files = [...(event.dataTransfer?.files ?? [])];
-  if (files.length) offerFiles(state.dropTarget, files);
+  if (files.length) shareFiles(files);
 });
 $('send-files').addEventListener('change', event => {
-  const recipient = state.selectedRecipient;
-  state.selectedRecipient = null;
   const files = [...event.target.files];
   event.target.value = '';
-  if (recipient && files.length) offerFiles(recipient, files);
+  if (files.length) shareFiles(files);
 });
 window.addEventListener('beforeunload', event => {
   if (state.active) { event.preventDefault(); event.returnValue = ''; }

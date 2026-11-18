@@ -28,7 +28,7 @@ button, input { font: inherit; }
 button { border: 0; cursor: pointer; border-radius: 12px; padding: 11px 16px; font-weight: 650; transition: background .15s, border-color .15s, transform .15s; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button:not(:disabled):active { transform: translateY(1px); }
-button:focus-visible, input:focus-visible, .device-row:focus-visible { outline: 3px solid var(--line-strong); outline-offset: 3px; }
+button:focus-visible, input:focus-visible { outline: 3px solid var(--line-strong); outline-offset: 3px; }
 [hidden] { display: none !important; }
 .app-shell { max-width: 1300px; margin: 0 auto; padding: 0 30px; }
 .site-header { background: var(--paper); border-bottom: 1px solid var(--line); }
@@ -99,9 +99,6 @@ main { min-height: calc(100vh - 76px); }
 .peer-panel { min-height: 420px; }
 .device-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
 .device-row { border: 1px solid transparent; border-radius: 16px; display: flex; align-items: center; flex-direction: column; text-align: center; gap: 6px; padding: 15px 7px 12px; min-width: 0; transition: border-color .15s, background .15s; }
-.device-row[role=button] { cursor: pointer; }
-.device-row[role=button]:not(.is-selected):hover { background: var(--tint-blue); border-color: var(--line-strong); }
-.device-row.is-selected { background: var(--accent-soft); border-color: var(--line-strong); }
 .device-icon { display: grid; place-items: center; width: 82px; height: 82px; border-radius: 50%; font-size: 38px; background: var(--tint-lilac); border: 2px solid var(--line-strong); margin-bottom: 4px; }
 .device-row:nth-child(3n + 1) .device-icon { background: var(--tint-blue); }
 .device-row:nth-child(3n + 2) .device-icon { background: var(--tint-lilac); }
@@ -118,7 +115,6 @@ main { min-height: calc(100vh - 76px); }
 .drop-symbol { display: grid; place-items: center; width: 67px; height: 67px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink); font-size: 35px; font-weight: 450; margin-bottom: 8px; line-height: 1; }
 .drop-zone strong { font-size: 19px; letter-spacing: -.025em; }
 .drop-detail { color: var(--muted); font-size: 13px; font-weight: 400; }
-.drop-target { display: block; background: var(--tint-lilac); color: var(--tint-lilac-ink); border-radius: 99px; font-size: 11px; padding: 4px 10px; margin-top: 7px; font-weight: 570; }
 .sent-files { padding-top: 12px; }
 .sent-files .file-row { padding: 10px 0; }
 .file-row, .job-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-top: 1px solid var(--line); }
