@@ -260,15 +260,17 @@ async def ws_handler(request):
                                     "generation": target_generation})
                     continue
                 if (not isinstance(signal, dict) or signal.get("type") not in
-                        ("offer", "answer", "candidate", "retry") or
+                        ("offer", "answer", "candidate", "retry", "role-switch") or
                         set(signal) - {"type", "sdp", "candidate", "attempt"}):
                     raise ValueError("不允许的信令消息类型")
                 attempt = signal.get("attempt")
                 if attempt is not None and (type(attempt) is not int or not 0 <= attempt <= 3):
                     raise ValueError("ICE 协商轮次无效")
-                if signal["type"] == "retry":
+                if signal["type"] in ("retry", "role-switch"):
                     if type(attempt) is not int or attempt < 1 or set(signal) != {"type", "attempt"}:
                         raise ValueError("重试请求格式无效")
+                    if signal["type"] == "role-switch" and attempt != 1:
+                        raise ValueError("角色切换仅允许首轮协商")
                 elif signal["type"] in ("offer", "answer"):
                     if not isinstance(signal.get("sdp"), str) or len(signal["sdp"]) > 45000:
                         raise ValueError("SDP 格式不正确")
