@@ -232,6 +232,42 @@ class SignallingTests(AioHTTPTestCase):
         await a.close()
         await b.close()
 
+    async def test_stalled_ice_retry_signalling_and_attempt_rejection(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        a = await self.client.ws_connect("/ws", headers=origin)
+        await a.send_json({"type": "enter", "code": "ICERETRY", "name": "A"})
+        a_welcome = await a.receive_json()
+        b = await self.client.ws_connect("/ws", headers=origin)
+        await b.send_json({"type": "enter", "code": "ICERETRY", "name": "B"})
+        b_welcome = await b.receive_json()
+        await a.receive_json()  # peer-online
+
+        await b.send_json({"type": "signal", "to": a_welcome["id"],
+                           "toGeneration": a_welcome["generation"],
+                           "signal": {"type": "retry", "attempt": 1}})
+        forwarded = await a.receive_json()
+        self.assertEqual(forwarded["type"], "signal")
+        self.assertEqual(forwarded["fromGeneration"], b_welcome["generation"])
+        self.assertEqual(forwarded["signal"], {"type": "retry", "attempt": 1})
+
+        await a.send_json({"type": "signal", "to": b_welcome["id"],
+                           "toGeneration": b_welcome["generation"],
+                           "signal": {"type": "offer", "attempt": 2, "sdp": "retry-sdp"}})
+        forwarded = await b.receive_json()
+        self.assertEqual(forwarded["signal"]["attempt"], 2)
+
+        for payload in (
+            {"type": "retry", "attempt": -1},
+            {"type": "retry", "attempt": True},
+            {"type": "retry", "attempt": 4},
+            {"type": "retry", "attempt": 1, "sdp": "extra"},
+        ):
+            await a.send_json({"type": "signal", "to": b_welcome["id"],
+                               "toGeneration": b_welcome["generation"], "signal": payload})
+            self.assertEqual((await a.receive_json())["type"], "error")
+        await a.close()
+        await b.close()
+
     async def test_checksum_module_is_served(self):
         response = await self.client.get("/static/checksum.js")
         self.assertEqual(response.status, 200)
