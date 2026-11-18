@@ -304,3 +304,20 @@ test('disconnected ICE transport schedules a bounded early retry', async () => {
   assert.equal(t.state.peers.get('other').attempt,2);
   assert.equal(original.pc.connectionState,'closed');
 });
+
+test('disconnected RTC is rebuilt even when DataChannel still reports open', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  const peer=t.state.peers.get('other');
+  peer.channel.readyState='open';
+  peer.pc.connectionState='disconnected';
+  peer.pc.onconnectionstatechange();
+  assert.equal([...t.timers.values()][0].ms,5000);
+  fireNextTimer(t);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(t.state.peers.get('other').attempt,2);
+  assert.equal(peer.pc.connectionState,'closed');
+});
