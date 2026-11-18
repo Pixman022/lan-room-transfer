@@ -1,4 +1,4 @@
-import { inspectSelectedPath } from './route-policy.js';
+import { inspectSelectedPath, isHostCandidateLine } from './route-policy.js';
 import { DEVICE_NAME_KEY, deviceAvatar, generateDeviceName, getOrCreateDeviceName } from './device-name.js';
 import { generateRandomRoomCode, normalizeRoomCode } from './room-code.js';
 
@@ -10,6 +10,7 @@ const $ = id => document.getElementById(id);
 const state = {
   ws: null, code: '', id: '', token: '', leaving: false, peers: new Map(),
   outbound: new Map(), ownOffers: [], offers: new Map(), jobs: [], queue: [], active: null,
+  signalErrors: 0, lastSignalError: '',
 };
 
 let currentDeviceName;
@@ -105,6 +106,12 @@ function orderedMessageHandler(handler, reportError) {
     return pending;
   };
 }
+function recordSignalError(message) {
+  state.signalErrors += 1;
+  state.lastSignalError = String(message || '信令错误')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]').slice(0, 160);
+  renderDiagnostics();
+}
 function connect(action) {
   if (state.ws && state.ws.readyState < WebSocket.CLOSING) return;
   feedback('正在连接协调服务…');
@@ -115,7 +122,7 @@ function connect(action) {
   ws.addEventListener('open', () => ws.send(JSON.stringify(action)));
   const processMessage = orderedMessageHandler(
     msg => state.ws === ws ? handleServer(msg) : undefined,
-    err => feedback(`连接处理失败：${err.message}`, true),
+    err => { recordSignalError(err.message); feedback(`连接处理失败：${err.message}`, true); },
   );
   ws.addEventListener('message', event => {
     let msg;
@@ -143,6 +150,7 @@ function connect(action) {
 async function handleServer(msg) {
   switch (msg.type) {
     case 'error':
+      recordSignalError(msg.message);
       feedback(msg.message || '未知错误', true);
       // A failed room entry must not leave the page stuck on an open WS.
       if (!state.code && state.ws) { state.leaving = true; state.ws.close(); }
@@ -202,7 +210,7 @@ async function createPeer(id, name, initiator) {
     const candidate = event.candidate.toJSON();
     // Only private-path host candidates and ICE end-of-candidates signaling.
     // No STUN/TURN, and the file-byte path gate is unchanged.
-    if (candidate.candidate !== '' && !/\btyp host\b/.test(candidate.candidate)) return;
+    if (candidate.candidate !== '' && !isHostCandidateLine(candidate.candidate)) return;
     if (candidate.candidate !== '') peer.candidateCount += 1;
     // A candidate can be emitted during setLocalDescription, before SDP is sent.
     // Buffer locally until offer/answer has been delivered in signaling order.
@@ -259,7 +267,7 @@ async function handleSignal(id, signal) {
     await peer.pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
     await flushCandidates(peer);
   } else if (signal.candidate && typeof signal.candidate.candidate === 'string' &&
-             (signal.candidate.candidate === '' || signal.candidate.candidate.includes(' typ host '))) {
+             (signal.candidate.candidate === '' || isHostCandidateLine(signal.candidate.candidate))) {
     if (signal.candidate.candidate !== '') peer.remoteCandidateCount = (peer.remoteCandidateCount || 0) + 1;
     if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(signal.candidate);
     else peer.candidates.push(signal.candidate);
@@ -543,6 +551,8 @@ function renderPeers() {
 function diagnosticsSnapshot() {
   return {
     signal: state.ws?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
+    signalErrors: state.signalErrors,
+    lastSignalError: state.lastSignalError,
     peerCount: state.peers.size,
     peers: [...state.peers.values()].map((peer, index) => ({
       device: index + 1,
@@ -569,6 +579,10 @@ function renderDiagnostics() {
   root.replaceChildren();
   const header = elem('p', 'diagnostic-line', data.peerCount ? `设备：${data.peerCount} · 可传：${data.peers.filter(peer => peer.canTransfer).length}` : '尚无其他设备');
   root.append(header);
+  if (data.signalErrors) {
+    root.append(elem('p', 'diagnostic-line',
+      `信令错误：${data.signalErrors} · ${data.lastSignalError}`));
+  }
   for (const peer of data.peers) {
     const line = elem('p', 'diagnostic-line');
     line.append(elem('strong', '', `设备 ${peer.device}  `));

@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assessPair, inspectSelectedPath, parseIPv4 } from '../public/route-policy.js';
+import { assessPair, inspectSelectedPath, isHostCandidateLine, parseIPv4 } from '../public/route-policy.js';
+
+test('host ICE candidate is accepted with or without trailing attributes', () => {
+  const host = 'candidate:1 1 udp 100 192.168.1.5 5555 typ host';
+  assert.equal(isHostCandidateLine(host), true);
+  assert.equal(isHostCandidateLine(host + ' generation 0'), true);
+  assert.equal(isHostCandidateLine(host.replace('typ host', 'typ srflx')), false);
+  assert.equal(isHostCandidateLine(host.replace('typ host', 'typ relay')), false);
+  assert.equal(isHostCandidateLine(''), false);
+});
 
 const pair = (a, b, typeA = 'host', typeB = 'host') => assessPair(
   {candidateType: typeA, address: a}, {candidateType: typeB, address: b});

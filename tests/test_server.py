@@ -151,6 +151,12 @@ class SignallingTests(AioHTTPTestCase):
             "type": "candidate", "candidate": {"candidate": "", "sdpMid": "0", "sdpMLineIndex": 0}}})
         forwarded = await b.receive_json()
         self.assertEqual(forwarded["signal"]["candidate"]["candidate"], "")
+        # Valid host candidates may end with "typ host" (no trailing space).
+        host = "candidate:1 1 udp 100 192.168.1.5 5555 typ host"
+        for raw in [host, host + " generation 0"]:
+            await a.send_json({"type": "signal", "to": b_welcome["id"], "signal": {
+                "type": "candidate", "candidate": {"candidate": raw, "sdpMid": "0"}}})
+            self.assertEqual((await b.receive_json())["signal"]["candidate"]["candidate"], raw)
         await a.send_json({"type": "signal", "to": b_welcome["id"], "signal": {
             "type": "candidate", "candidate": {
                 "candidate": "candidate:1 1 udp 1 203.0.113.1 11111 typ srflx", "sdpMid": "0"}}})

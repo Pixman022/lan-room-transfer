@@ -3,6 +3,12 @@
  * address is observed, or if private IPv4 peers aren't in the same /24.
  * A private /24 match still cannot prove a physical LAN; see docs/limitations.md.
  */
+// ICE candidates may end immediately after "typ host" (without extension attributes).
+// Keep the filter host-only; it does not by itself prove a local network route.
+export function isHostCandidateLine(raw) {
+  return typeof raw === 'string' && raw.startsWith('candidate:') && /\btyp host\b/.test(raw);
+}
+
 export function parseIPv4(address) {
   if (typeof address !== 'string' || !/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return null;
   const octets = address.split('.').map(Number);
