@@ -46,13 +46,19 @@ A client reported `目标设备已离线` while its local RTC object was still `
 
 The revised implementation supports authenticated WebSocket takeover, uses a new generation identifier for each peer session, rejects signaling addressed to an obsolete generation, ignores unknown/late peer signals, and prevents a replaced old socket from sending a false offline notice. Server integration and protocol tests pass; stable behavior across repeated real-world network changes is not yet proven. Both browsers should reload after deployment to use the generation-aware protocol.
 
+## P1 — Automatic signalling recovery (2026-11-18)
+
+The browser now reconnects on unexpected WebSocket loss, using the previous room code and session token with exponentially increasing retry delays capped at 15 seconds. A successful room welcome resets the backoff and rebuilds the WebRTC connections. Existing uploader-local File objects remain staged and are resynchronized to verified peers; interrupted inbound jobs and queued downloads fail safely instead of assuming byte-stream resumption. An explicit Leave cancels timers. The aiohttp WebSocket server already has a 25-second ping heartbeat, and no extra app-layer ping was introduced.
+
+Node-based browser controller tests cover backoff, restoration of the room identity and local file objects, interrupted queued jobs, rejection of invalid initial entry, and Leave cancellation. These are stubbed tests, not evidence that all mobile/sleep/wake or Wi-Fi handover conditions are stable. ICE retry while signalling remains healthy is a separate remaining problem.
+
 ## P1 — Scope still pending
 
 - QR invite / mobile scan flow
 - Optional custom save-location UI
 - Durable file save completion acknowledgement
 - Peer block list and anti-spam UX
-- Clean handling of rapid reconnect/ICE restarts and queue recovery
+- ICE failure/restart while signalling remains connected, plus richer retry/resume for interrupted download jobs
 - Better error UX: browser permissions, blocked Wi-Fi client isolation, wrong network
 - Live end-to-end tests with two distinct devices and public HTTPS signalling
 

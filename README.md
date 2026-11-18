@@ -30,7 +30,7 @@ The Render Free web-service plan may sleep during inactivity and wake with a del
 - On first entry the code creates a room; subsequent users entering the same code join automatically with no approval. No separate create/join UI or administrator; provisional cap of 10 online members
 - Initial 4-digit suggestion comes from currently unoccupied codes; **suggestions are not reserved** until entry. Room membership remains open while the room is live; custom codes are reusable but not permanently reserved
 - 2-minute idle expiry after everyone disconnects, with session-token-based recovery. A valid refreshed session takes over the old WebSocket instead of creating a duplicate device; every connection has an ephemeral generation ID, so delayed ICE/SDP and old disconnect events cannot alter the replacement peer.
-- WebSocket offer/answer/ICE signalling only. File metadata and bytes never intentionally pass through the signal server
+- WebSocket offer/answer/ICE signalling only. File metadata and bytes never intentionally pass through the signal server. On unexpected socket loss, the browser now retries the same room with an exponential delay (1/2/4/8/15 seconds, capped at 15 seconds), keeps staged local files, and rebuilds peer connections when room entry succeeds. Manual exit disables retries. Active/queued downloads are marked interrupted and require a new request rather than unsafe byte-stream continuation. The aiohttp server already sends WebSocket ping frames (`heartbeat=25`); browsers reply automatically, so no separate application-level ping was added.
 - Browser WebRTC DataChannel (`iceServers: []`); restricted P2P checks require a selected `host`/`host` ICE pair, allow browser-hidden/mDNS addresses, and still reject confirmed relay/reflexive pairs, known public/unsupported addresses and mismatched visible private subnets. **No absolute LAN-only guarantee.**
 - Friendly default **English Color + Animal** name (for example `Amber Bear` or `Coral Fox`) on first visit, saved in the browser; editable on the home page or inside a room. Old automatically generated Chinese `label-1234` defaults are migrated, while user-chosen names are preserved. Name updates propagate without changing device identity. A browser refresh can restore the room using the existing single entry action
 - **Warm pale-orange visual design**, white cards on a soft peach background, short labels and playful animal avatars (inspired by the visual reference supplied for this separate project)
@@ -71,7 +71,7 @@ The optional `tests/browser_smoke.py` requires Playwright/Chromium and a locally
 4. The UI has no QR joining, peer blocklist, automatic content security scanning, or persisted transfer history yet.
 5. Same-code rooms are global to a single signalling process; peer names may be disclosed to other users who know/guess a code. Room code is not a password.
 6. Security hardening for production (trusted proxy headers, persistent rate limiting, deployments with sticky WebSockets, load tests, CSP audit, advanced abuse controls) remains to be done.
-7. Automated tests cover room/signalling/API logic, random device-name persistence logic, and the route-policy heuristic; they do not constitute end-to-end WebRTC transfer validation.
+7. Automated tests cover room/signalling/API logic, random device-name persistence logic, the route-policy heuristic and browser-controller retry logic in a Node VM stub. They do not constitute end-to-end WebRTC transfer validation. Automatic retry after real network loss and long-running mobile background recovery require field tests.
 
 ## Project structure
 
@@ -90,6 +90,7 @@ package.json               JS unit test configuration (no npm install required)
 tests/test_server.py        unit + WebSocket signalling tests
 tests/route-policy.test.mjs JS path heuristic tests
 tests/checksum.test.mjs    SHA-256, mismatch and malformed-digest tests
+tests/reconnect.test.mjs   Node VM controller tests for reconnect/backoff/manual exit and local files
 tests/device-name.test.mjs  random name and persistence unit tests
 tests/room-code.test.mjs    random room code and custom code validation tests
 tests/offline_room_ui.py   interactive mock-peer browser checks and screenshots
