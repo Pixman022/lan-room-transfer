@@ -30,6 +30,7 @@ class Member:
     token: str
     name: str
     ws: web.WebSocketResponse | None = None
+    generation: str = field(default_factory=lambda: secrets.token_urlsafe(8))
 
 
 @dataclass
@@ -113,11 +114,12 @@ class RoomRegistry:
         member = room.members.get(id_)
         if member is None or not isinstance(token, str) or not secrets.compare_digest(member.token, token):
             raise ValueError("会话无法恢复")
-        if member.ws is not None and not member.ws.closed:
-            raise ValueError("此设备的房间会话已在其他页面使用")
-        if len(room.online()) >= MAX_ONLINE_MEMBERS:
+        # An authenticated refresh replaces its old socket instead of creating
+        # a duplicate device. Count a replacing member only once for capacity.
+        if (member.ws is None or member.ws.closed) and len(room.online()) >= MAX_ONLINE_MEMBERS:
             raise ValueError("房间在线设备已达到上限")
         member.ws = ws
+        member.generation = secrets.token_urlsafe(8)
         room.empty_at = None
         return room, member
 
@@ -131,13 +133,14 @@ class RoomRegistry:
 
 async def send(ws, payload):
     if ws is None or ws.closed:
-        return
+        return False
     try:
         await ws.send_json(payload)
+        return True
     except (ConnectionResetError, RuntimeError):
-        # A peer may close between the socket check and the write (e.g. during redeploy).
-        # Treat it as disconnected instead of breaking cleanup for other room members.
-        pass
+        # A socket can close between checking and writing; do not pretend the
+        # offer/answer/ICE message was delivered successfully.
+        return False
 
 
 async def announce(room, payload, except_id=None):
@@ -195,6 +198,10 @@ async def ws_handler(request):
             if not isinstance(data, dict):
                 raise ValueError("信令消息格式无效")
             kind = data.get("type")
+            if member is not None and member.ws is not ws:
+                # The same authenticated device has already resumed elsewhere.
+                await ws.close(code=4001, message=b"Session replaced")
+                break
             if kind == "enter":
                 if room is not None:
                     raise ValueError("请先离开当前房间")
@@ -204,13 +211,30 @@ async def ws_handler(request):
                     attempts.popleft()
                 if len(attempts) > 15:
                     raise ValueError("房间操作过于频繁")
+                code = registry.validate_code(data.get("code"))
+                prior_room = registry.rooms.get(code)
+                prior = (prior_room.members.get(data["id"]) if prior_room and
+                         isinstance(data.get("id"), str) else None)
+                old_ws = prior.ws if prior else None
+                old_generation = prior.generation if prior else None
                 new_room, new_member, created = registry.enter(
-                    data.get("code"), data.get("name"), ws, data.get("id"), data.get("token"))
+                    code, data.get("name"), ws, data.get("id"), data.get("token"))
                 room, member = new_room, new_member
-                peers = [{"id": p.id, "name": p.name} for p in room.online() if p.id != member.id]
-                await send(ws, {"type": "welcome", "code": room.code, "id": member.id, "token": member.token,
+                resumed = prior is member
+                if resumed:
+                    # Reset old RTC peer objects before the new socket begins
+                    # offering. This also covers reconnecting after a brief gap.
+                    await announce(room, {"type": "peer-offline", "id": member.id,
+                                          "generation": old_generation}, member.id)
+                    if old_ws is not None and old_ws is not ws and not old_ws.closed:
+                        asyncio.create_task(old_ws.close(code=4001, message=b"Session replaced"))
+                peers = [{"id": p.id, "name": p.name, "generation": p.generation}
+                         for p in room.online() if p.id != member.id]
+                await send(ws, {"type": "welcome", "code": room.code, "id": member.id,
+                                "generation": member.generation, "token": member.token,
                                 "name": member.name, "peers": peers, "created": created})
-                await announce(room, {"type": "peer-online", "id": member.id, "name": member.name}, member.id)
+                await announce(room, {"type": "peer-online", "id": member.id,
+                                      "generation": member.generation, "name": member.name}, member.id)
             elif kind == "rename":
                 if not room or not member:
                     raise ValueError("尚未加入房间")
@@ -224,8 +248,13 @@ async def ws_handler(request):
                     raise ValueError("尚未加入房间")
                 target = room.members.get(data.get("to"))
                 signal = data.get("signal")
-                if not target or target.ws is None or target.ws.closed or target.id == member.id:
-                    raise ValueError("目标设备已离线")
+                target_generation = data.get("toGeneration")
+                if (not target or target.ws is None or target.ws.closed or
+                        target.id == member.id or not isinstance(target_generation, str) or
+                        target.generation != target_generation):
+                    await send(ws, {"type": "peer-unavailable", "id": data.get("to"),
+                                    "generation": target_generation})
+                    continue
                 if (not isinstance(signal, dict) or signal.get("type") not in ("offer", "answer", "candidate")
                         or set(signal) - {"type", "sdp", "candidate"}):
                     raise ValueError("不允许的信令消息类型")
@@ -248,15 +277,22 @@ async def ws_handler(request):
                         raise ValueError("sdpMLineIndex 无效")
                     if candidate.get("usernameFragment") is not None and (not isinstance(candidate["usernameFragment"], str) or len(candidate["usernameFragment"]) > 256):
                         raise ValueError("ICE 用户片段无效")
-                await send(target.ws, {"type": "signal", "from": member.id, "signal": signal})
+                delivered = await send(target.ws, {"type": "signal", "from": member.id,
+                                                   "fromGeneration": member.generation, "signal": signal})
+                if not delivered:
+                    await send(ws, {"type": "peer-unavailable", "id": target.id,
+                                    "generation": target_generation})
             else:
                 raise ValueError("未知的信令命令")
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             await send(ws, {"type": "error", "message": str(exc)})
 
-    if room and member:
+    if room and member and member.ws is ws:
+        # An old socket replaced during resume must not announce that the
+        # newly resumed incarnation is offline.
         registry.leave(room, member, ws)
-        await announce(room, {"type": "peer-offline", "id": member.id}, member.id)
+        await announce(room, {"type": "peer-offline", "id": member.id,
+                              "generation": member.generation}, member.id)
     return ws
 
 
