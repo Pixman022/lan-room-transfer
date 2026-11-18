@@ -58,6 +58,12 @@ A real-device diagnostic showed `signal=connected`, `stage=answer-sent`, `ice=ne
 
 Python signalling tests and mock browser-controller tests cover the attempt message, retry bounds, stale candidates, old PC cleanup, and open-channel preservation. These tests do not prove that multiple attempts will overcome network isolation, mDNS or UDP reachability problems. Both devices must refresh after deployment. Record both peers' new `attempt`, `signalingState`, `iceGathering`, local/remote description flags, `ice`, and `channel` if repeated field tests fail.
 
+## P1 — Phone-initiated first-join fallback (2026-11-18)
+
+After first-join presence ordering was fixed, the user confirmed PC joining a mobile room succeeds, but mobile joining a PC-created room still fails. In this app, the newer participant is always the initial WebRTC offerer. The remaining failure may depend on the mobile offerer role, but no two-sided raw logs yet prove whether the fault is signaling, mDNS, host ICE candidate reachability or network configuration.
+
+A bounded compatibility fallback now reverses the roles **only after the initial attempt stalls**: the original answerer starts attempt 2 as offerer; the original offerer becomes answerer. A new `role-switch` signaling control is idempotent when both sides time out simultaneously; the existing attempt numbering discards old ICE candidates. Attempt 3 retains the new offerer. Browser-controller simulation and server protocol tests pass, but this **must be tested on two real devices**. There are no new STUN/TURN servers, cloud file relays, or changed room/transfer actions.
+
 ## P1 — Scope still pending
 
 - QR invite / mobile scan flow
