@@ -1,6 +1,6 @@
 # POC field test matrix
 
-Status: **partial manual check only** on actual devices. The reported results confirm that Device A could enter a room and Device B could enter using the same code; they do **not** confirm file selection, peer WebRTC connectivity, file catalog visibility, or file bytes transferred. Tests marked "未通过/未测试" were not separated into definite failures vs not-run.
+Status (2026-11-18): **User reports successful bidirectional file transfer between real devices after restricted P2P mode was deployed.** This confirms the basic send/receive path was exercised by the user, beyond the previous room-entry-only result. File sizes, saved-file SHA-256 comparisons, repeated-run reliability, device/browser versions, and cross-network security have **not** been independently verified. Earlier "未通过/未测试" responses were ambiguous and are superseded only for the basic transfer scenario.
 
 **Connection stability follow-up (2026-11-18):** User reported that establishing a peer connection sometimes takes unusually long and behaves inconsistently. This is an observation, not yet a measured failure rate. Code fixes now serialize incoming SDP/ICE operations, send local SDP before buffered candidates, forward ICE end-of-candidates, and show an explicit status after 12 seconds while permitting late recovery. Do not equate this to verified performance improvement until separate devices repeat the test. For each retry, record `stage`, `elapsedSeconds`, `candidatesSent`, `candidatesReceived`, `ice`, `channel`, and `reason` from the privacy-reduced diagnostics on both devices. Browser automation here could only test mocked peer sequencing, not a genuine routed LAN path.
 
@@ -8,7 +8,7 @@ To collect follow-up evidence, open **诊断** next to the online device count a
 
 | Case | Setup | Expected outcome | Status |
 |---|---|---|---|
-| P2P-01 | Two real devices on same Wi-Fi/router with a direct host pair | Join same room, accept masked host addresses, share and download a 1 MB test file; verify saved hash | Not run |
+| P2P-01 | Two real devices on same Wi-Fi/router with a direct host pair | Join same room, accept masked host addresses, share and download a 1 MB test file; verify saved hash | **Partial: user-reported bidirectional transfer successful**; exact file size, download/hash and network characteristics still to verify |
 | P2P-02 | Two different Wi-Fi networks with internet | Verify no cloud relay; host-only peer connectivity may succeed or fail. Record actual path and warn that physical LAN isolation is not guaranteed | Not run |
 | LAN-03 | Two devices on guest Wi-Fi with AP/client isolation | Cannot establish direct connection; clear error | Not run |
 | LAN-04 | Two devices on a VPN exposing similar private IP ranges | Observe and assess whether route heuristic can give false positives | Not run |
@@ -28,7 +28,7 @@ To collect follow-up evidence, open **诊断** next to the online device count a
 | UX-03 | Upload another file with two verified devices connected | Both see the new file metadata, not its bytes; unverified peers receive no catalog | Offline desktop/mobile UI harness passed; LAN field test pending |
 | UX-04 | Uploading device withdraws file | File disappears from other room devices and is unavailable to new joiners | Offline browser UI harness passed; LAN field test pending |
 | UX-05 | Uploading device goes offline | Its shared files disappear from the room; already downloaded files remain available locally | Offline browser UI harness passed; LAN field test pending |
-| FILE-01 | Receiver clicks one file's Receive | Only that file is transferred | Browser pending |
+| FILE-01 | Receiver clicks one file's Receive | Only that file is transferred | **Basic transfer user-reported successful in both directions**; per-file control and checksum not separately verified |
 | FILE-02 | Receiver clicks Receive All | Remaining files transferred sequentially | Browser pending |
 | FILE-03 | Cancel, disconnect, retry | Clear states; no data mixed between jobs | Browser pending |
 | FILE-04 | 10 MB, then 100 MB, then 1 GB | Track time, memory and save success; larger files are **future** goals | 10 MB possible within cap, live test pending; others unsupported |
