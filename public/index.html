@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#fff8f3" />
+  <title>LAN Room — 文件互传</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="app-shell topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">↗</span><span>LAN Room</span></div>
+      <div class="top-status"><span class="prototype-chip">技术原型</span><span class="connection-status" id="connection-status">未连接</span></div>
+    </div>
+  </header>
+  <main class="app-shell">
+    <section id="home-screen" class="home-screen">
+      <div class="home-intro">
+        <h1>轻松分享文件</h1>
+      </div>
+      <div class="panel entry-panel">
+        <div class="identity-preview">
+          <div class="avatar avatar-lg" id="home-device-avatar" aria-hidden="true">🐾</div>
+          <div><p class="tiny-label">当前设备</p><strong id="home-device-label">—</strong></div>
+        </div>
+        <label for="device-name">设备名称</label>
+        <input id="device-name" maxlength="40" autocomplete="off" placeholder="Blue Fox" />
+        <label for="room-code-input">房间码</label>
+        <div class="room-code-editor">
+          <input id="room-code-input" maxlength="16" autocomplete="off" spellcheck="false" aria-label="房间码" placeholder="1234 / HOME2026" />
+          <button id="regenerate-code" class="secondary" type="button" title="更换随机码" aria-label="更换随机码">↻</button>
+        </div>
+        <button id="enter-room" class="primary wide" type="button">进入房间 <span aria-hidden="true">→</span></button>
+      </div>
+    </section>
+
+    <section id="room-screen" hidden>
+      <div class="room-heading">
+        <div class="room-heading-copy">
+          <p class="tiny-label">房间</p>
+          <div class="room-title-line"><h1 id="room-name">—</h1><span class="chip ready">在线</span></div>
+        </div>
+        <div class="room-actions">
+          <button id="copy-code" class="secondary" type="button">复制房间码</button>
+          <button id="leave-room" class="quiet-button" type="button">退出</button>
+        </div>
+      </div>
+      <div class="identity-strip">
+        <div class="identity-main">
+          <span class="avatar avatar-lg" id="my-device-avatar" aria-hidden="true">🐾</span>
+          <div class="identity-copy"><span class="tiny-label">我的设备</span><strong id="my-device-label">—</strong></div>
+          <button id="edit-device-name" class="text-button" type="button" aria-expanded="false" aria-controls="name-editor-panel">改名</button>
+        </div>
+        <div class="rename-inline" id="name-editor-panel" hidden>
+          <label class="sr-only" for="room-device-name">新的设备名称</label>
+          <input id="room-device-name" maxlength="40" autocomplete="off" placeholder="设备名称" />
+          <button id="save-device-name" class="secondary" type="button">保存</button>
+          <button id="cancel-device-name" class="text-button" type="button">取消</button>
+        </div>
+      </div>
+
+      <div class="room-grid">
+        <section class="panel peer-panel">
+          <div class="section-heading"><h2>在线设备</h2><span class="muted small" id="device-count">0 台</span></div>
+          <div class="device-list" id="peer-list"></div>
+          <input id="send-files" type="file" multiple hidden aria-label="选择要发送的文件" />
+        </section>
+        <div class="stack room-right">
+          <section class="panel upload-panel">
+            <div class="section-heading"><h2>发送文件</h2></div>
+            <button class="drop-zone" id="drop-zone" type="button" aria-describedby="drop-target">
+              <span class="drop-symbol" aria-hidden="true">↑</span>
+              <strong>拖放文件到这里</strong>
+              <span class="drop-detail">或点击选择</span>
+              <span class="drop-target" id="drop-target">请先选择左侧设备</span>
+            </button>
+            <div class="sent-files" id="sent-files" hidden></div>
+          </section>
+          <section class="panel">
+            <div class="section-heading"><h2>待接收</h2><span class="muted small" id="request-count">0 个</span></div>
+            <div id="incoming-requests" class="request-list"><p class="empty">暂无文件</p></div>
+          </section>
+          <section class="panel">
+            <div class="section-heading"><h2>传输</h2></div>
+            <div id="transfer-jobs" class="jobs-list"><p class="empty">暂无任务</p></div>
+          </section>
+        </div>
+      </div>
+    </section>
+    <p class="feedback" id="feedback" role="status" aria-live="polite"></p>
+    <p class="prototype-note" role="note">技术原型 · 单文件上限 32 MB · 局域网路径未经真实设备验收</p>
+  </main>
+</body>
+</html>
