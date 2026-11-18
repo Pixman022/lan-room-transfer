@@ -191,7 +191,7 @@ async function createPeer(id, name, initiator) {
   if (state.peers.has(id)) return state.peers.get(id);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, pc, channel: null, verified: false, remoteReady: false,
-    ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(),
+    ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, startedAt: Date.now(), connectTimer: null };
   state.peers.set(id, peer);
@@ -290,6 +290,13 @@ function attachChannel(peer, channel) {
       try { verdict = await inspectSelectedPath(peer.pc); }
       catch (err) { verdict = { allowed: false, reason: `路径检查失败：${err.message}` }; }
       peer.reason = verdict.reason;
+      peer.routeInfo = {
+        code: verdict.code ?? 'stats-error',
+        localAddressKind: verdict.localAddressKind ?? 'unavailable',
+        remoteAddressKind: verdict.remoteAddressKind ?? 'unavailable',
+        localCandidateType: verdict.localCandidateType ?? 'unavailable',
+        remoteCandidateType: verdict.remoteCandidateType ?? 'unavailable',
+      };
       if (verdict.allowed) {
         peer.verified = true;
         channel.send(JSON.stringify({ kind: 'ready' }));
@@ -561,6 +568,7 @@ function diagnosticsSnapshot() {
       channel: peer.channel?.readyState ?? 'none',
       routeVerified: Boolean(peer.verified),
       peerVerified: Boolean(peer.remoteReady),
+      route: peer.routeInfo,
       stage: peer.stage || 'unknown',
       elapsedSeconds: Math.floor((Date.now() - (peer.startedAt || Date.now())) / 1000),
       candidatesSent: peer.candidateCount || 0,
@@ -588,6 +596,9 @@ function renderDiagnostics() {
     line.append(elem('strong', '', `设备 ${peer.device}  `));
     line.append(document.createTextNode(`${peer.connection} / ${peer.ice} / ${peer.channel} · ${peer.stage} · ${peer.reason || '等待连接'}`));
     root.append(line);
+    if (peer.route) {
+      root.append(elem('p', 'diagnostic-line', `路径：${peer.route.code}（本地 ${peer.route.localAddressKind} / 远端 ${peer.route.remoteAddressKind}）`));
+    }
   }
 }
 $('toggle-diagnostics').addEventListener('click', () => {
