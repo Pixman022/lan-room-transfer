@@ -8,7 +8,13 @@ const appSource = readFileSync(new URL('../public/app.js', import.meta.url), 'ut
   .split('\n').filter(line => !line.startsWith('import ')).join('\n');
 
 // Exercise the real room controller against DOM/WebSocket stubs, without network access.
-function harness() {
+function harness({debug = false} = {}) {
+  const debugMessages = [];
+  const testConsole = {
+    log: (...args) => debugMessages.push(args),
+    error: (...args) => console.error(...args),
+    warn: (...args) => console.warn(...args),
+  };
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) {
@@ -88,7 +94,11 @@ function harness() {
       createTextNode: value => ({textContent: value}),
     },
     sessionStorage,
-    location: { protocol: 'https:', host: 'test.example' },
+    location: {
+      protocol: 'https:', host: 'test.example',
+      search: debug ? '?debug=1' : '',
+      href: debug ? 'https://test.example/?debug=1' : 'https://test.example/',
+    },
     WebSocket: FakeWebSocket,
     RTCPeerConnection: FakeRTCPeerConnection,
     isHostCandidateLine,
@@ -96,8 +106,8 @@ function harness() {
     clearTimeout: id => timers.delete(id),
     queueMicrotask,
     fetch: async () => { throw Error('no test network'); },
-    navigator: {}, crypto: {randomUUID: () => 'test-uuid'},
-    Blob, Map, Set, Date, Promise, console,
+    navigator: {userAgent: 'TestBrowser'}, crypto: {randomUUID: () => 'test-uuid'},
+    Blob, Map, Set, Date, Promise, console: testConsole,
     DEVICE_NAME_KEY: 'device-key',
     getOrCreateDeviceName: () => 'Amber Fox',
     generateDeviceName: () => 'Amber Fox',
@@ -107,7 +117,7 @@ function harness() {
   });
   vm.runInContext(appSource, context, {filename:'app.js'});
   const run = expression => vm.runInContext(expression, context);
-  return {state: run('state'), run, timers, elements, FakeWebSocket, FakeRTCPeerConnection};
+  return {state: run('state'), run, timers, elements, FakeWebSocket, FakeRTCPeerConnection, debugMessages};
 }
 const join = async (t, socket, generation='gen-1') => {
   socket.open();
@@ -322,4 +332,33 @@ test('disconnected RTC is rebuilt even when DataChannel still reports open', asy
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(t.state.peers.get('other').attempt,2);
   assert.equal(peer.pc.connectionState,'closed');
+});
+
+test('full debug mode prints raw credentials, SDP, candidate addresses and file names', async () => {
+  const t = harness({debug: true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket = t.FakeWebSocket.sockets[0];
+  await join(t, socket);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:1,sdp:"v=0\\r\\nc=IN IP4 10.12.34.56\\r\\n"})');
+  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.9.4 7777 typ host"}})');
+  t.run('shareFiles([{name:"private-debug-file.txt",size:5,type:"text/plain",lastModified:42}])');
+  const dump = JSON.stringify(t.debugMessages);
+  assert.match(dump, /LAN Room debug/);
+  assert.match(dump, /room.joined/);
+  assert.match(dump, /local-token/);
+  assert.match(dump, /5832/);
+  assert.match(dump, /offer-sdp/);
+  assert.match(dump, /10\\.12\\.34\\.56/);
+  assert.match(dump, /192\\.168\\.9\\.4/);
+  assert.match(dump, /private-debug-file\\.txt/);
+});
+
+test('default mode does not log room credentials or raw SDP', async () => {
+  const t = harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket = t.FakeWebSocket.sockets[0];
+  await join(t, socket);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  assert.equal(t.debugMessages.length, 0);
 });
