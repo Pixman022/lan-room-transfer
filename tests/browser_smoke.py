@@ -36,8 +36,18 @@ with sync_playwright() as pw:
     assert b.locator('#peer-list').get_by_text('Windows 笔记本').count() == 1
     assert a.locator('#send-target').count() == 0
     assert a.locator('#send-offer').count() == 0
-    assert a.locator('#peer-list .device-row button').count() == 1
-    assert a.locator('#peer-list .device-row button').is_disabled(), 'same-host route must remain blocked'
+    assert a.locator('#peer-list .device-row').count() == 1
+    assert a.locator('#peer-list .device-row button').count() == 0
+    assert a.locator('#connection-status').inner_text() == '直连未就绪', 'same-host route must remain blocked'
+    a.locator('#toggle-diagnostics').click()
+    assert a.locator('#diagnostics-panel').is_visible()
+    assert a.locator('#diagnostics-content .diagnostic-line').count() == 2
+    a.locator('#toggle-diagnostics').click()
+    with a.expect_file_chooser() as chooser:
+        a.locator('#drop-zone').click()
+    chooser.value.set_files({'name': 'smoke.txt', 'mimeType': 'text/plain', 'buffer': b'hello'})
+    assert a.locator('#sent-files .file-row').count() == 1
+    assert '等待设备直连' in a.locator('#sent-files .file-row').inner_text(), 'same-host route still blocked'
     assert a.locator('#name-editor-panel').is_hidden()
     assert a.locator('#my-device-label').inner_text() == 'Windows 笔记本'
     a.locator('#edit-device-name').click()
@@ -50,7 +60,7 @@ with sync_playwright() as pw:
     a.screenshot(path=str(Path(__file__).resolve().parents[1] / 'docs/desktop-ui.png'), full_page=True)
     b.screenshot(path=str(Path(__file__).resolve().parents[1] / 'docs/mobile-ui.png'), full_page=True)
     assert not errors, errors
-    print('PASS: room entry, presence, inline rename, peer action safety state, responsive UI, no JS errors')
+    print('PASS: room entry, presence, unverified-route status, diagnostic panel, file staging, rename, responsive UI, no JS errors')
     print('NOTE: no file bytes tested; same-host loopback is intentionally rejected by route policy')
     b.locator('#leave-room').click()
     b.locator('#home-screen').wait_for(state='visible')

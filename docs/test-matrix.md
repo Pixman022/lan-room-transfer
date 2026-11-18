@@ -1,6 +1,8 @@
 # POC field test matrix
 
-Status: **not executed** on actual two-device LAN. These are the acceptance gates for the next stage.
+Status: **partial manual check only** on actual devices. The reported results confirm that Device A could enter a room and Device B could enter using the same code; they do **not** confirm file selection, peer WebRTC connectivity, file catalog visibility, or file bytes transferred. Tests marked "未通过/未测试" were not separated into definite failures vs not-run.
+
+To collect follow-up evidence, open **诊断** next to the online device count and use **复制诊断** separately on each device. The copied report excludes room code, member names, file names, and network IP addresses. Record whether the status says 房间已连接, 直连未就绪 or 文件直连就绪; also record whether the uploader's file shows 等待设备直连 or 可供 N 台设备接收. Do not infer that "房间已连接" means the file path is ready. The conservative route policy remains active.
 
 | Case | Setup | Expected outcome | Status |
 |---|---|---|---|

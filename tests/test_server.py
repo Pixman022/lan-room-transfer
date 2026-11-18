@@ -3,7 +3,16 @@ import unittest
 
 from aiohttp.test_utils import AioHTTPTestCase
 
-from server import RoomRegistry, create_app
+from server import RoomRegistry, create_app, send
+
+
+class ClosedSocketTests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_ignores_transport_closed_during_write(self):
+        class ClosingWebSocket:
+            closed = False
+            async def send_json(self, _):
+                raise ConnectionResetError('Cannot write to closing transport')
+        await send(ClosingWebSocket(), {'type': 'peer-offline'})
 
 
 class RoomUnitTests(unittest.TestCase):

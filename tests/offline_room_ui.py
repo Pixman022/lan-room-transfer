@@ -44,6 +44,8 @@ with sync_playwright() as playwright:
         assert page.locator('#peer-list .device-row').count() == 0
         assert page.locator('#drop-target').count() == 0
         assert page.locator('#peer-list button').count() == 0
+        assert page.locator('#connection-status').inner_text() == '房间已连接'
+        assert page.locator('#toggle-diagnostics').count() == 1
         # A file can be shared before another device arrives.
         with page.expect_file_chooser() as chooser:
             page.locator('#drop-zone').click()
@@ -52,6 +54,7 @@ with sync_playwright() as playwright:
         assert page.evaluate('window.__messages.length') == 0
         assert page.locator('#sent-files .file-row').count() == 1
         assert page.locator('#sent-files .file-row button').inner_text() == '移除'
+        assert '等待设备直连' in page.locator('#sent-files .file-row').inner_text()
 
         # Verify all ready devices get the existing catalog, but unready ones do not.
         page.evaluate('''() => {
@@ -72,6 +75,14 @@ with sync_playwright() as playwright:
         assert page.evaluate('window.__messages.every(m => m.packet.kind === "file-list")')
         assert page.locator('#peer-list .device-row').count() == 3
         assert page.locator('#peer-list button').count() == 0
+        assert page.locator('#connection-status').inner_text() == '文件直连就绪'
+        assert '可供 2 台设备接收' in page.locator('#sent-files .file-row').inner_text()
+        page.locator('#toggle-diagnostics').click()
+        assert page.locator('#diagnostics-panel').is_visible()
+        assert page.locator('#diagnostics-content .diagnostic-line').count() == 4
+        assert '设备：3' in page.locator('#diagnostics-panel').inner_text()
+        page.locator('#toggle-diagnostics').click()
+        assert page.locator('#diagnostics-panel').is_hidden()
         assert page.locator('#peer-list .device-icon').first.inner_text() == '🐻'
         assert page.locator('#name-editor-panel').is_hidden()
         page.locator('#edit-device-name').click()

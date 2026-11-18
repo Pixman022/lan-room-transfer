@@ -130,8 +130,14 @@ class RoomRegistry:
 
 
 async def send(ws, payload):
-    if ws is not None and not ws.closed:
+    if ws is None or ws.closed:
+        return
+    try:
         await ws.send_json(payload)
+    except (ConnectionResetError, RuntimeError):
+        # A peer may close between the socket check and the write (e.g. during redeploy).
+        # Treat it as disconnected instead of breaking cleanup for other room members.
+        pass
 
 
 async def announce(room, payload, except_id=None):
