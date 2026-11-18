@@ -1,5 +1,9 @@
 # LAN Room — LAN browser file transfer (research POC)
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Pixman022/lan-room-transfer)
+
+**Deployment requires approval in your Render account; the GitHub repository itself does not host a running server.**
+
 **Independent project. Not part of Fresnica.** Repository name is provisional and does not define the final product brand.
 
 This is a **developer proof of concept**, not a production deployment or a verified LAN-only product. End users will access the public HTTPS site without installing or hosting a local signalling server. `server.py` serves both the UI and WebSocket signalling; the included `render.yaml` prepares the service for hosted testing. Running it locally is only for development.
