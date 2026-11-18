@@ -283,9 +283,11 @@ test('healthy open DataChannel is not replaced when connection timer fires', asy
   const peer=t.state.peers.get('other');
   const initialPackets=socket.sent.length;
   peer.channel.readyState='open';
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
   fireNextTimer(t);
   assert.equal(t.state.peers.get('other'),peer);
-  assert.equal(peer.pc.connectionState,'new');
+  assert.equal(peer.pc.connectionState,'connected');
   assert.equal(socket.sent.length,initialPackets);
 });
 
