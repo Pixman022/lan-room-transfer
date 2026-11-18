@@ -75,7 +75,7 @@ with sync_playwright() as playwright:
             window.RTCPeerConnection = FakePC;
             window.__demo.state.ws={readyState:WebSocket.OPEN,send:payload=>log.push(JSON.parse(payload))};
             try {
-                const peer=await window.__demo.createPeer('ice-order-test','P',true);
+                const peer=await window.__demo.createPeer('ice-order-test','P',true,'mock-session');
                 clearTimeout(peer.connectTimer); peer.pc.close();
                 window.__demo.state.peers.delete(peer.id);
                 return log.map(x=>x.signal.type).join(',');
@@ -84,6 +84,16 @@ with sync_playwright() as playwright:
                 window.__demo.state.ws=null;
             }
         }''') == 'offer,candidate'
+        # A signal from an already-removed session cannot recreate a ghost peer.
+        assert page.evaluate('''async () => {
+            const d = window.__demo;
+            const absent = !d.state.peers.has('stale-peer');
+            await d.handleServer({
+                type:'signal', from:'stale-peer', fromGeneration:'previous',
+                signal:{type:'offer',sdp:'old-sdp'},
+            });
+            return absent && !d.state.peers.has('stale-peer');
+        }''')
         assert page.locator('#connection-status').inner_text() == '房间已连接'
         assert page.locator('#toggle-diagnostics').count() == 1
         # A file can be shared before another device arrives.
@@ -113,6 +123,15 @@ with sync_playwright() as playwright:
         }''')
         assert page.evaluate('window.__messages.length') == 2
         assert page.evaluate('window.__messages.every(m => m.packet.kind === "file-list")')
+        # A previous websocket incarnation cannot disconnect a newer one.
+        assert page.evaluate('''async () => {
+            const d = window.__demo;
+            const peer = d.state.peers.get('peer-2');
+            peer.generation = 'current-session';
+            await d.handleServer({type:'peer-offline',id:'peer-2',generation:'old-session'});
+            await d.handleServer({type:'peer-unavailable',id:'peer-2',generation:'old-session'});
+            return d.state.peers.get('peer-2') === peer;
+        }''')
         assert page.locator('#peer-list .device-row').count() == 3
         assert page.locator('#peer-list button').count() == 0
         assert page.locator('#connection-status').inner_text() == '文件直连就绪'
