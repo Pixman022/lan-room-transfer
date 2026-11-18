@@ -10,7 +10,7 @@ code = '\n'.join(re.sub(r'\bexport (?=(?:const|function|async function)\b)', '',
 app = '\n'.join(line for line in (ROOT / 'public/app.js').read_text().splitlines()
                 if not line.startswith('import '))
 code += '\n' + app + '\nwindow.__demo = {state, showRoom, renderPeers, renderRequests, renderJobs, '
-code += 'syncSharedOffers, receiveChannel, handleServer, shareFiles, withdrawSharedFile};'
+code += 'syncSharedOffers, receiveChannel, handleServer, shareFiles, withdrawSharedFile, orderedMessageHandler, createPeer};'
 html = (ROOT / 'public/index.html').read_text()
 css = (ROOT / 'public/styles.css').read_text()
 html = html.replace('<link rel="stylesheet" href="/static/styles.css" />', '<style>' + css + '</style>')
@@ -44,6 +44,46 @@ with sync_playwright() as playwright:
         assert page.locator('#peer-list .device-row').count() == 0
         assert page.locator('#drop-target').count() == 0
         assert page.locator('#peer-list button').count() == 0
+        # Regression: async SDP processing must finish before later ICE candidates.
+        assert page.evaluate('''async () => {
+            const observed = [];
+            const dispatch = window.__demo.orderedMessageHandler(async message => {
+                observed.push('begin-' + message);
+                if (message === 'offer') await new Promise(resolve => setTimeout(resolve, 30));
+                observed.push('end-' + message);
+            }, error => { throw error; });
+            await Promise.all([dispatch('offer'), dispatch('candidate')]);
+            return observed.join(',');
+        }''') == 'begin-offer,end-offer,begin-candidate,end-candidate'
+        # Regression: local ICE can appear synchronously inside setLocalDescription.
+        # SDP must be relayed before the buffered ICE candidate.
+        assert page.evaluate('''async () => {
+            const old = window.RTCPeerConnection;
+            const log = [];
+            class FakePC {
+                constructor() { this.connectionState='new'; this.iceConnectionState='new'; }
+                createDataChannel() { return {readyState:'connecting'}; }
+                createOffer() { return Promise.resolve({type:'offer',sdp:'sdp'}); }
+                async setLocalDescription(offer) {
+                    this.localDescription=offer;
+                    const candidate={candidate:'candidate:1 1 udp 1 192.168.1.2 999 typ host',
+                        toJSON(){return {candidate:this.candidate,sdpMid:'0',sdpMLineIndex:0}}};
+                    this.onicecandidate({candidate});
+                }
+                close() { this.connectionState='closed'; }
+            }
+            window.RTCPeerConnection = FakePC;
+            window.__demo.state.ws={readyState:WebSocket.OPEN,send:payload=>log.push(JSON.parse(payload))};
+            try {
+                const peer=await window.__demo.createPeer('ice-order-test','P',true);
+                clearTimeout(peer.connectTimer); peer.pc.close();
+                window.__demo.state.peers.delete(peer.id);
+                return log.map(x=>x.signal.type).join(',');
+            } finally {
+                window.RTCPeerConnection=old;
+                window.__demo.state.ws=null;
+            }
+        }''') == 'offer,candidate'
         assert page.locator('#connection-status').inner_text() == '房间已连接'
         assert page.locator('#toggle-diagnostics').count() == 1
         # A file can be shared before another device arrives.
