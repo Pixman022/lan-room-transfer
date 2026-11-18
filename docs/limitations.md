@@ -52,13 +52,19 @@ The browser now reconnects on unexpected WebSocket loss, using the previous room
 
 Node-based browser controller tests cover backoff, restoration of the room identity and local file objects, interrupted queued jobs, rejection of invalid initial entry, and Leave cancellation. These are stubbed tests, not evidence that all mobile/sleep/wake or Wi-Fi handover conditions are stable. ICE retry while signalling remains healthy is a separate remaining problem.
 
+## P1 — Bounded WebRTC negotiation recovery (2026-11-18)
+
+A real-device diagnostic showed `signal=connected`, `stage=answer-sent`, `ice=new`, `channel=none` and zero signalling errors after 46 seconds. The previous 12-second timer only changed the displayed error; it did not repair the peer connection. This release retries with a fresh `RTCPeerConnection` (up to three ICE attempts), lets the responder send a bounded retry request to the offerer, and marks each offer/answer/host candidate with an attempt number to prevent old ICE from entering a new connection. When ICE fails or disconnects, a shorter recovery timer is set. Already open file channels are not needlessly replaced. No STUN/TURN was introduced and the host-only route checks still apply.
+
+Python signalling tests and mock browser-controller tests cover the attempt message, retry bounds, stale candidates, old PC cleanup, and open-channel preservation. These tests do not prove that multiple attempts will overcome network isolation, mDNS or UDP reachability problems. Both devices must refresh after deployment. Record both peers' new `attempt`, `signalingState`, `iceGathering`, local/remote description flags, `ice`, and `channel` if repeated field tests fail.
+
 ## P1 — Scope still pending
 
 - QR invite / mobile scan flow
 - Optional custom save-location UI
 - Durable file save completion acknowledgement
 - Peer block list and anti-spam UX
-- ICE failure/restart while signalling remains connected, plus richer retry/resume for interrupted download jobs
+- Real-network effectiveness of bounded ICE reoffers, plus richer retry/resume for interrupted download jobs
 - Better error UX: browser permissions, blocked Wi-Fi client isolation, wrong network
 - Live end-to-end tests with two distinct devices and public HTTPS signalling
 
