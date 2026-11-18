@@ -11,6 +11,16 @@ Current fail-closed test strategy: `iceServers=[]`, transmit only host candidate
 2. Use an additional trusted network-local component or a platform API where applicable (this changes the zero-install/zero-deploy promise and requires product approval), or
 3. Keep strict fail-closed behavior and accept limited browser/network support, provided false-positive network-routing risks are evaluated.
 
+## P0 — Real-device connection succeeds; browser address privacy prevents strict path verification
+
+Two separate devices reported \`connection=connected\`, \`ice=connected\`, \`channel=open\`, and zero signalling errors, yet \`routeVerified=false\`. The blocker is the application's /24 private-IPv4 selected-pair gate, not a failed WebRTC handshake. Browser WebRTC statistics are permitted to redact remote candidate IP addresses, and mDNS ICE candidate names intentionally hide the underlying LAN address. Connected/no-TURN/host-only ICE is not proof of a physical LAN route: a VPN can produce similar candidate types. Do not bypass this gate without an explicit product decision.
+
+The app now diagnoses \`mdns-obfuscated\`, \`address-hidden\`, \`ipv6-unsupported\`, \`subnet-mismatch\`, \`non-host\`, and unavailable candidate stats, exposing only coarse address categories and no raw address in copied diagnostics. This improves observability, **not** connectivity.
+
+**Product choice before permitting files on masked-address browsers:** retain conservative fail-closed checks with limited compatibility, or explicitly accept that browser-only zero-install P2P without a relay cannot guarantee the connection physically stays on the same LAN. Allowing host-only connections with hidden addresses would be a change to the earlier strict LAN-only promise, not a bug fix. A trusted local component/network API would be another scope change.
+
+Standards references: https://www.w3.org/TR/webrtc-stats/ and https://rtcweb-wg.github.io/mdns-ice-candidates/mmusic/draft-ietf-mmusic-mdns-ice-candidates.html
+
 ## P0 — Global room code and guessed IDs
 
 The signalling service keeps active room codes in one global process. If users in different networks choose the same code, they see signalling presence and try to establish WebRTC. The path check should block file content unless candidate addresses pass. A 4-digit code has only 10,000 possibilities and is not a secret. Use rate limits, avoid persisting file names centrally, keep device block decisions local, and consider optional stronger room codes for sensitive use.
