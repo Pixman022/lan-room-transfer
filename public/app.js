@@ -246,8 +246,8 @@ function dropPeer(id, generation) {
   const peer = state.peers.get(id);
   if (!peer || (generation && peer.generation !== generation)) return false;
   clearTimeout(peer.connectTimer);
-  peer.pc.close();
   state.peers.delete(id);
+  peer.pc.close();
   if (state.active?.peerId === id) failActive('发送设备已离线');
   discardPeerOffers(id);
   renderPeers(); renderRequests(); renderJobs();
