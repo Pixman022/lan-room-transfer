@@ -258,7 +258,8 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
   peer.connectTimer = setTimeout(() => {
     if (state.peers.get(peer.id) !== peer || peer.ready ||
         peer.pc.connectionState === 'closed' ||
-        (peer.channel?.readyState === 'open' && peer.pc.connectionState !== 'failed') ||
+        (peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected' &&
+         peer.pc.iceConnectionState !== 'failed') ||
         state.ws?.readyState !== WebSocket.OPEN) return;
     if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS) {
       peer.reason = '正在重新协商直连';
@@ -356,7 +357,8 @@ async function handleSignal(id, fromGeneration, signal) {
   if (!peer || peer.generation !== fromGeneration) return;
   if (signal.type === 'retry') {
     if (peer.initiator && !peer.ready && signal.attempt === peer.attempt &&
-        peer.channel?.readyState !== 'open' && peer.attempt < PEER_MAX_ATTEMPTS) {
+        !(peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected') &&
+        peer.attempt < PEER_MAX_ATTEMPTS) {
       await createPeer(id, peer.name, true, peer.generation, peer.attempt + 1, true);
     }
     return;
