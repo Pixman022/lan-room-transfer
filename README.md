@@ -35,8 +35,8 @@ The Render Free web-service plan may sleep during inactivity and wake with a del
 - Friendly default **English Color + Animal** name (for example `Amber Bear` or `Coral Fox`) on first visit, saved in the browser; editable on the home page or inside a room. Old automatically generated Chinese `label-1234` defaults are migrated, while user-chosen names are preserved. Name updates propagate without changing device identity. A browser refresh can restore the room using the existing single entry action
 - **Warm pale-orange visual design**, white cards on a soft peach background, short labels and playful animal avatars (inspired by the visual reference supplied for this separate project)
 - Room-wide ephemeral file shelf: **drop or choose files immediately after entering**—no recipient selection. All verified connected peers see shared file names and sizes, and later joiners receive the uploader's current catalog. Peers decide independently whether to **Receive** or **Receive All**. File bytes transfer only on explicit receipt over accepted direct P2P WebRTC channels. The uploader can withdraw a shared file. No file bytes or metadata are intentionally stored by the public signalling server. Shared files disappear from the room when the uploading device leaves or disconnects.
-- Global one-file-at-a-time receiver queue, cancellation/retry controls and progress
-- Browser download link after receiving a file; each file is limited to **32 MiB** in this POC
+- Global one-file-at-a-time receiver queue, cancellation/retry controls and progress. Sender computes a SHA-256 digest; receiver independently verifies it before showing the **Save** link. A mismatch discards received content and enables retry. Waiting for a sender times out after 20 seconds; active transfer stalls after 30 seconds without progress (rather than 20 seconds total).
+- Browser download link after receiving and SHA-256 verifying a file; each file is limited to **32 MiB** in this POC. Digesting a file requires reading it in memory; this is not yet streaming support.
 - Desktop/mobile responsive UI draft
 
 ## Run locally — Windows PowerShell
@@ -66,7 +66,7 @@ The optional `tests/browser_smoke.py` requires Playwright/Chromium and a locally
 ## What is NOT proven / NOT production-ready
 
 1. **Restricted P2P mode (approved 2026-11-18):** accept an explicitly selected `host`/`host` ICE candidate pair when browser privacy hides one or both addresses; reject `relay`/`srflx`, visible public/unsupported addresses, known mismatched private IPv4 /24 networks, and identical readable endpoints. The app has no configured STUN/TURN and does not relay file bytes or file metadata through its cloud signalling service. **This does not prove that the network route remains on one physical LAN.** VPN or unusual routing may still carry P2P traffic outside it.
-2. No real two-physical-device LAN transfer test was run yet. Network outcomes cannot be inferred from unit tests.
+2. The user has successfully transferred files in both directions between real devices. Automatic SHA-256 verification and progress-based stall handling are newly implemented but **not yet verified on real devices**. End-to-end saved-file hash comparison and repeated-run reliability remain pending.
 3. Receiving files currently buffers up to 32 MiB in the browser and provides a manual **Save** link upon arrival. Automatic default download and optional File System Access directory/file picker have **not** been implemented yet.
 4. The UI has no QR joining, peer blocklist, automatic content security scanning, or persisted transfer history yet.
 5. Same-code rooms are global to a single signalling process; peer names may be disclosed to other users who know/guess a code. Room code is not a password.
@@ -83,11 +83,13 @@ public/room-code.js        initial room-code suggestion and input validation
 public/styles.css          responsive styles
 public/app.js              WebRTC and file-list/queue prototype
 public/route-policy.js     restricted host-only P2P candidate-pair policy
+public/checksum.js         browser WebCrypto SHA-256 and verification helpers
 requirements.txt
 Dockerfile                 container packaging for HTTPS reverse-proxied deployment
 package.json               JS unit test configuration (no npm install required)
 tests/test_server.py        unit + WebSocket signalling tests
 tests/route-policy.test.mjs JS path heuristic tests
+tests/checksum.test.mjs    SHA-256, mismatch and malformed-digest tests
 tests/device-name.test.mjs  random name and persistence unit tests
 tests/room-code.test.mjs    random room code and custom code validation tests
 tests/offline_room_ui.py   interactive mock-peer browser checks and screenshots

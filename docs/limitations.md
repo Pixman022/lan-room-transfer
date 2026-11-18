@@ -16,7 +16,7 @@ Also, a room code is not authorization: room participants can view file metadata
 
 ## P0 — Real-device connection reliability
 
-Two-device connection and file-channel establishment have been observed in user diagnostics; file bytes have **not** yet been confirmed end-to-end. Browser-side candidate stats are diagnostic hints, not proof of a physical LAN path. Test two separate physical devices with a new room, validate file download and hashes, then test a VPN and two separate networks to measure connectivity and disclosure. Do not report strict LAN isolation as passed.
+The user has since confirmed successful bidirectional file transfers between two real devices (2026-11-18). However, file sizes, saved-file hash comparison, multi-file queues and repeatability have not been established. Browser-side candidate stats are diagnostic hints, not proof of a physical LAN path. Test checksum-verified downloads on the newly deployed code, then test a VPN and two separate networks to measure connectivity and disclosure. Do not report strict LAN isolation as passed.
 
 Official references: https://www.w3.org/TR/webrtc-stats/ and https://rtcweb-wg.github.io/mdns-ice-candidates/mmusic/draft-ietf-mmusic-mdns-ice-candidates.html
 
@@ -29,6 +29,12 @@ The home screen suggests a currently unused 4-digit code, **but does not reserve
 ## P1 — Ephemeral room file shelf
 
 The shared file catalog lives only in each uploader's browser memory and is replicated to verified room members over WebRTC; it is not persisted by the signalling service. Late joiners can discover files only while their uploader remains connected and a qualifying peer path is available. Refreshing, closing, or disconnecting the uploader removes its offers, including files others have not yet downloaded. This is not cloud storage or a persistent room drive.
+
+## P1 — Integrity verification and stalls
+
+The sender now transmits a lowercase SHA-256 digest inside the encrypted WebRTC DataChannel at the end of each file. The receiver calculates SHA-256 from received chunks and exposes a Save link only if the value matches. Missing, invalid or mismatched hashes fail the transfer; clients must both refresh to use this new protocol. This provides an end-to-end check against accidental corruption, **not** authentication of the uploader: a malicious room participant controls both their file and its digest. WebRTC already protects transmitted data in transit through DTLS.
+
+Receiving files currently buffers a maximum of 32 MiB; SHA-256 calculation also requires whole-file access and can increase peak browser memory. The sender waits up to 20 seconds for file-start; once bytes begin flowing, the receiver uses a 30-second no-progress timeout instead of an unconditional 20-second cap. True streaming hashes, transfer resume and multi-device stress results are future work.
 
 ## P1 — Reliability and mobile downloads
 

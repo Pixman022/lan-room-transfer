@@ -29,12 +29,15 @@ To collect follow-up evidence, open **诊断** next to the online device count a
 | UX-04 | Uploading device withdraws file | File disappears from other room devices and is unavailable to new joiners | Offline browser UI harness passed; LAN field test pending |
 | UX-05 | Uploading device goes offline | Its shared files disappear from the room; already downloaded files remain available locally | Offline browser UI harness passed; LAN field test pending |
 | FILE-01 | Receiver clicks one file's Receive | Only that file is transferred | **Basic transfer user-reported successful in both directions**; per-file control and checksum not separately verified |
+| HASH-01 | Receive a small file on updated clients | Sender sends SHA-256 on P2P file-end; receiver verifies exact bytes before exposing Save link | SHA-256 helper unit tests pass; real-device UI pending |
+| HASH-02 | Corrupted bytes, missing/malformed hash | Receiver rejects data, offers retry, never exposes Save link for failed content | Unit tests cover checksum mismatch and bad hashes; end-to-end fault injection pending |
 | FILE-02 | Receiver clicks Receive All | Remaining files transferred sequentially | Browser pending |
 | FILE-03 | Cancel, disconnect, retry | Clear states; no data mixed between jobs | Browser pending |
+| FILE-05 | File transfer runs longer than 20 seconds but makes progress | Do not time out during normal progress; fail if no progress for 30 seconds | Code updated; real-device slow-link test pending |
 | FILE-04 | 10 MB, then 100 MB, then 1 GB | Track time, memory and save success; larger files are **future** goals | 10 MB possible within cap, live test pending; others unsupported |
 | MOBILE-01 | Android Chrome | Join, share files directly, receive, save | Not run |
 | MOBILE-02 | iOS Safari | Join, share files directly, receive, save | Not run |
 
-For every test record: browser/version, operating system, selected ICE candidate types/addresses (redacted), route verdict, bytes actually sent, file hash verification, user-visible error, and pass/fail. Do not collect filenames or file bytes in public service logs.
+For every test record: browser/version, operating system, selected ICE candidate types/addresses (redacted), route verdict, bytes actually sent, SHA-256 verification and saved-file comparison, user-visible error, and pass/fail. Do not collect filenames or file bytes in public service logs.
 
 Offline UI interaction harness (`python tests/offline_room_ui.py`) uses mocked peer connections, not real signalling or file bytes. It checks room entry, English names and animal avatars, sharing before any peers arrive, room-wide file announcements, late-join synchronization, withdrawal, single/receive-all controls, sequential queue, inline rename, and mobile/desktop overflow; screenshots in `docs/*-static.png` reflect this test fixture only.
