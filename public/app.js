@@ -198,8 +198,12 @@ async function handleServer(msg) {
     case 'error':
       recordSignalError(msg.message);
       feedback(msg.message || '未知错误', true);
-      // A failed room entry must not leave the page stuck on an open WS.
-      if (!state.code && state.ws) { state.leaving = true; state.ws.close(); }
+      // On reconnect, the prior room code remains set but welcome has not
+      // arrived yet. Close the rejected socket so the retry loop can continue.
+      if (!state.generation && state.ws) {
+        if (!state.code) state.leaving = true;
+        state.ws.close();
+      }
       break;
     case 'welcome': {
       const restored = Boolean(state.code);
