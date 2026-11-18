@@ -10,7 +10,7 @@ const MAX_FILES = 20;
 const TRANSFER_IDLE_MS = 30000;
 const $ = id => document.getElementById(id);
 const state = {
-  ws: null, code: '', id: '', token: '', leaving: false, peers: new Map(),
+  ws: null, code: '', id: '', token: '', generation: '', leaving: false, peers: new Map(),
   outbound: new Map(), ownOffers: [], offers: new Map(), jobs: [], queue: [], active: null,
   signalErrors: 0, lastSignalError: '',
 };
@@ -56,8 +56,9 @@ function updateConnectionSummary() {
   status.dataset.state = ready ? 'ready' : 'waiting';
 }
 function sendSignal(to, signal) {
-  if (state.ws?.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: 'signal', to, signal }));
+  const peer = state.peers.get(to);
+  if (peer?.generation && state.ws?.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: 'signal', to, toGeneration: peer.generation, signal }));
   }
 }
 function sendPeer(peer, control) {
@@ -144,7 +145,7 @@ function connect(action) {
     showRoom(false);
     renderPeers();
     if (!state.leaving) feedback('协调服务已断开，可尝试恢复房间会话', true);
-    state.code = ''; state.ownOffers = []; state.outbound.clear(); state.offers.clear();
+    state.code = ''; state.generation = ''; state.ownOffers = []; state.outbound.clear(); state.offers.clear();
     renderSentFiles(); renderRequests();
   });
   ws.addEventListener('error', () => feedback('无法连接协调服务，请检查地址与网络', true));
@@ -158,7 +159,7 @@ async function handleServer(msg) {
       if (!state.code && state.ws) { state.leaving = true; state.ws.close(); }
       break;
     case 'welcome':
-      state.code = msg.code; state.id = msg.id; state.token = msg.token;
+      state.code = msg.code; state.id = msg.id; state.token = msg.token; state.generation = msg.generation;
       rememberRoom(); showRoom(true); $('room-name').textContent = msg.code;
       $('room-code-input').value = msg.code;
       // Resume may restore a server-side name from before the last local edit.
@@ -166,33 +167,46 @@ async function handleServer(msg) {
         state.ws?.send(JSON.stringify({ type: 'rename', name: currentDeviceName }));
       }
       feedback('已进入房间，等待设备 P2P 直连');
-      for (const other of msg.peers) await createPeer(other.id, other.name, true);
+      for (const other of msg.peers) await createPeer(other.id, other.name, true, other.generation);
       renderPeers(); renderRequests(); renderJobs(); renderSentFiles(); break;
     case 'peer-online':
-      if (msg.id !== state.id) await createPeer(msg.id, msg.name, false);
+      if (msg.id !== state.id) await createPeer(msg.id, msg.name, false, msg.generation);
       renderPeers(); break;
-    case 'peer-offline': {
-      const peer = state.peers.get(msg.id);
-      if (peer) { clearTimeout(peer.connectTimer); peer.pc.close(); state.peers.delete(msg.id); }
-      if (state.active?.peerId === msg.id) failActive('发送设备已离线');
-      discardPeerOffers(msg.id);
-      renderPeers(); renderRequests(); renderJobs(); break;
-    }
+    case 'peer-offline':
+      dropPeer(msg.id, msg.generation);
+      break;
+    case 'peer-unavailable':
+      if (dropPeer(msg.id, msg.generation)) feedback('目标设备连接已失效，已清理旧会话');
+      break;
     case 'peer-name': {
       const peer = state.peers.get(msg.id);
       if (peer) { peer.name = msg.name; renderPeers(); renderRequests(); }
       break;
     }
     case 'signal':
-      await handleSignal(msg.from, msg.signal); break;
+      await handleSignal(msg.from, msg.fromGeneration, msg.signal); break;
     default: break;
   }
 }
 
-async function createPeer(id, name, initiator) {
-  if (state.peers.has(id)) return state.peers.get(id);
+function dropPeer(id, generation) {
+  const peer = state.peers.get(id);
+  if (!peer || (generation && peer.generation !== generation)) return false;
+  clearTimeout(peer.connectTimer);
+  peer.pc.close();
+  state.peers.delete(id);
+  if (state.active?.peerId === id) failActive('发送设备已离线');
+  discardPeerOffers(id);
+  renderPeers(); renderRequests(); renderJobs();
+  return true;
+}
+async function createPeer(id, name, initiator, generation) {
+  if (!generation) return null;
+  const previous = state.peers.get(id);
+  if (previous?.generation === generation) return previous;
+  if (previous) dropPeer(id, previous.generation);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
-  const peer = { id, name, pc, channel: null, verified: false, remoteReady: false,
+  const peer = { id, name, generation, pc, channel: null, verified: false, remoteReady: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, startedAt: Date.now(), connectTimer: null };
@@ -208,7 +222,7 @@ async function createPeer(id, name, initiator) {
     }
   }, 12000);
   pc.onicecandidate = event => {
-    if (!event.candidate) return;
+    if (!event.candidate || state.peers.get(id) !== peer) return;
     const candidate = event.candidate.toJSON();
     // Only private-path host candidates and ICE end-of-candidates signaling.
     // No STUN/TURN; selected host candidates still pass the restricted P2P policy.
@@ -247,6 +261,7 @@ async function createPeer(id, name, initiator) {
 }
 
 function sendLocalDescription(peer, type) {
+  if (state.peers.get(peer.id) !== peer) return;
   sendSignal(peer.id, { type, sdp: peer.pc.localDescription.sdp });
   peer.stage = `${type}-sent`;
   peer.localSdpSent = true;
@@ -254,9 +269,12 @@ function sendLocalDescription(peer, type) {
     sendSignal(peer.id, { type: 'candidate', candidate });
   }
 }
-async function handleSignal(id, signal) {
+async function handleSignal(id, fromGeneration, signal) {
   if (!signal || !['offer', 'answer', 'candidate'].includes(signal.type)) return;
-  const peer = state.peers.get(id) || await createPeer(id, '其他设备', false);
+  // Late messages from an already-offline or replaced session must not create
+  // ghost peers or contaminate the new incarnation's ICE candidates.
+  const peer = state.peers.get(id);
+  if (!peer || peer.generation !== fromGeneration) return;
   if (signal.type === 'offer') {
     peer.stage = 'offer-received';
     await peer.pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
@@ -788,7 +806,7 @@ $('leave-room').onclick = () => {
   state.ws?.close(); state.ws = null;
   for (const peer of state.peers.values()) { clearTimeout(peer.connectTimer); peer.pc.close(); }
   state.peers.clear();
-  state.code = '';
+  state.code = ''; state.generation = '';
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };
 $('copy-code').onclick = async () => { try { await navigator.clipboard.writeText(state.code); feedback('房间码已复制'); } catch { feedback(`房间码：${state.code}`); } };
