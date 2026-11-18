@@ -1,11 +1,107 @@
-# LAN Room Transfer
+# LAN Room — LAN browser file transfer (research POC)
 
-Browser-based local network file transfer proof of concept.
+**Independent project. Not part of Fresnica.** Repository name is provisional and does not define the final product brand.
 
-This is an independent project, unrelated to Fresnica.
+This is a **developer proof of concept**, not a production deployment or a verified LAN-only product. End users will access the public HTTPS site without installing or hosting a local signalling server. `server.py` serves both the UI and WebSocket signalling; the included `render.yaml` prepares the service for hosted testing. Running it locally is only for development.
 
-> Development prototype. LAN-only route enforcement and real-device file transfer have not been validated yet. Do not use for sensitive files.
+## Deploy from your GitHub repository
 
-The app requires a running Python/WebSocket signaling service, so GitHub Pages alone cannot host it. See `render.yaml` and `docs/deploy.md` once the full source has been committed.
+This application **cannot run on GitHub Pages alone** because its Python WebSocket signalling server requires a running backend. For one public URL, keep the source on GitHub and host both the website and signalling server as one Render web service.
 
-User requirements: one-button room entry (auto-create or join), random 4-digit room codes, custom alphanumeric rooms, English color+animal device names, warm pale-orange UI, device-to-device file offers, individual receive and receive-all, and receiver-side sequential queue.
+1. The separate repository is [Pixman022/lan-room-transfer](https://github.com/Pixman022/lan-room-transfer). Do not upload this project to any Fresnica repository.
+2. The project source, tests, and deployment configuration are maintained in this repository.
+3. Open [Deploy to Render](https://render.com/deploy?repo=https://github.com/Pixman022/lan-room-transfer), authorize the repository if prompted, then review and deploy the service described in `render.yaml`.
+4. Once deployed, open the exact HTTPS URL shown in **your Render dashboard**. Two devices on the same LAN should access the same URL. Do not assume any particular Render URL before it has been created.
+5. Check `/health` on that HTTPS URL, then follow `docs/test-matrix.md` with two physical devices.
+
+Render sets `RENDER_EXTERNAL_URL` automatically, which this app uses to enforce the WebSocket `Origin` check when `PUBLIC_ORIGIN` is not set. The server binds to `0.0.0.0` under Render; do not expose your local test server directly to the internet.
+
+**Security limitation:** Publishing the signalling service exposes room lookup to the internet. Four-digit room codes are easy to guess; the current per-IP limits are not a production abuse defence. Also, the WebRTC route heuristic can be wrong about VPNs and complex networks. Use nonsensitive test files only until real-device security testing has passed.
+
+The Render Free web-service plan may sleep during inactivity and wake with a delay. The GitHub repository hosts **source code**, while the public running app lives on Render. See [deployment notes](docs/deploy.md).
+
+## Implemented now
+
+- Python `aiohttp` signalling server; a single **Enter Room** action for random 4-digit codes or user-defined 4–16 alphanumeric codes (case-insensitive)
+- On first entry the code creates a room; subsequent users entering the same code join automatically with no approval. No separate create/join UI or administrator; provisional cap of 10 online members
+- Initial 4-digit suggestion comes from currently unoccupied codes; **suggestions are not reserved** until entry. Room membership remains open while the room is live; custom codes are reusable but not permanently reserved
+- 2-minute idle expiry after everyone disconnects, with session-token-based recovery
+- WebSocket offer/answer/ICE signalling only. File metadata and bytes never intentionally pass through the signal server
+- Browser WebRTC DataChannel (`iceServers: []`); conservative candidate-pair check before allowing file transfers
+- Friendly default **English Color + Animal** name (for example `Amber Bear` or `Coral Fox`) on first visit, saved in the browser; editable on the home page or inside a room. Old automatically generated Chinese `label-1234` defaults are migrated, while user-chosen names are preserved. Name updates propagate without changing device identity. A browser refresh can restore the room using the existing single entry action
+- **Warm pale-orange visual design**, white cards on a soft peach background, short labels and playful animal avatars (inspired by the visual reference supplied for this separate project)
+- Room workspace with direct **Send Files** actions on connected devices, plus a drop zone: click a device to select it, then click/drag files into the drop zone; the file list is sent immediately (no extra confirmation). Unverified peers cannot receive file offers. Incoming requests retain single-file **Receive** and **Receive All** only
+- Global one-file-at-a-time receiver queue, cancellation/retry controls and progress
+- Browser download link after receiving a file; each file is limited to **32 MiB** in this POC
+- Desktop/mobile responsive UI draft
+
+## Run locally — Windows PowerShell
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python server.py
+```
+
+Open **http://127.0.0.1:8765** in a browser. The page suggests a random device name and 4-digit room code; optionally edit either, then click **进入房间**. The first user with that code creates the live room; every later user with that code enters it automatically. This checks the interface and WebSocket signalling on one computer. **Two tabs of the same computer are deliberately denied file transfer** because the LAN route policy rejects same-address/loopback connections. This is expected.
+
+For actual two-device testing, deploy the app + signalling server behind a **trusted HTTPS origin with WebSocket (`wss://`) support**, then open the same public URL on two different devices connected to a LAN. No local server is needed for those users. Ensure `PUBLIC_ORIGIN` exactly equals the public `https://...` origin. A static GitHub Pages site alone cannot host this WebSocket signalling server.
+
+## Run automated tests
+
+```bash
+python -m unittest discover -s tests -v
+node --test tests/*.test.mjs
+```
+
+The offline `python tests/offline_room_ui.py` harness (Playwright/Chromium) validates device avatar updates, room buttons, device selection, direct file picker, drag/drop, receive controls, queue display, rename, and desktop/mobile overflow with mocked peers. Generated screenshots in `docs/*-static.png` are fixture-based UI demonstrations, not evidence of working device-to-device transfer.
+
+The optional `tests/browser_smoke.py` requires Playwright/Chromium and a locally running server. It was not successfully run in the current isolated execution environment because Chromium's administrator policy blocks local HTTP connections. Static desktop/mobile screenshots in `docs/` were rendered without network access and do **not** constitute a functional browser test.
+
+## What is NOT proven / NOT production-ready
+
+1. A browser cannot cryptographically or authoritatively prove the OS's actual route is local. The current check only accepts `host` ICE candidate pairs with **two distinct, readable RFC1918 IPv4 addresses in the same /24**. This intentionally rejects IPv6, mDNS/hidden IPs, same-device loopback, many VPNs, and some legitimate LANs. A VPN or unusual routing setup can still falsely appear to satisfy the rule. **It does not meet an absolute LAN-only security guarantee.**
+2. No real two-physical-device LAN transfer test was run yet. Network outcomes cannot be inferred from unit tests.
+3. Receiving files currently buffers up to 32 MiB in the browser and provides a manual **Save** link upon arrival. Automatic default download and optional File System Access directory/file picker have **not** been implemented yet.
+4. The UI has no QR joining, peer blocklist, automatic content security scanning, or persisted transfer history yet.
+5. Same-code rooms are global to a single signalling process; peer names may be disclosed to other users who know/guess a code. Room code is not a password.
+6. Security hardening for production (trusted proxy headers, persistent rate limiting, deployments with sticky WebSockets, load tests, CSP audit, advanced abuse controls) remains to be done.
+7. Automated tests cover room/signalling/API logic, random device-name persistence logic, and the route-policy heuristic; they do not constitute end-to-end WebRTC transfer validation.
+
+## Project structure
+
+```text
+server.py                  public signalling and static web host
+public/index.html          desktop/mobile web interface
+public/device-name.js      device name generation and storage
+public/room-code.js        initial room-code suggestion and input validation
+public/styles.css          responsive styles
+public/app.js              WebRTC and file-list/queue prototype
+public/route-policy.js     fail-closed candidate pair heuristic
+requirements.txt
+Dockerfile                 container packaging for HTTPS reverse-proxied deployment
+package.json               JS unit test configuration (no npm install required)
+tests/test_server.py        unit + WebSocket signalling tests
+tests/route-policy.test.mjs JS path heuristic tests
+tests/device-name.test.mjs  random name and persistence unit tests
+tests/room-code.test.mjs    random room code and custom code validation tests
+tests/offline_room_ui.py   interactive mock-peer browser checks and screenshots
+tests/screenshot_static.py  compatible wrapper for the offline screenshot harness
+tests/browser_smoke.py     optional live signalling Chromium smoke test (environment-dependent)
+docs/limitations.md        risk register and next decisions
+docs/test-matrix.md        manual field test plan
+```
+
+## Product decisions reflected in this code
+
+- Web UI; no client app installation; no server deployment required **for end users**.
+- Internet for HTTPS page/signalling only; content is intended to transfer via direct LAN WebRTC.
+- Everyone with the room code can join without approval; no owner/admin.
+- One entry action automatically creates a missing room or enters an existing one. Room code suggestions are not reserved, so concurrent users could claim a suggested code before it is submitted.
+- Custom code can be reused after room expires, with no permanent ownership.
+- Creator departure does not close room; room persists while members remain and for 2 minutes after the last leaves.
+- The receiver sees all file names and sizes, can receive one file or all remaining files. No checkboxes, no "receive selected".
+- One active inbound file at a time per receiving browser, with progress, cancellation and retry.
+
+See `docs/test-matrix.md` for the practical validation order before V1 development.

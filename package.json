@@ -1,0 +1,8 @@
+{
+  "name": "lan-room-transfer-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:policy": "node --test tests/*.test.mjs"
+  }
+}

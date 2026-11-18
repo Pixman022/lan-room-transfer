@@ -1,0 +1,13 @@
+# Deploy the entire app as one HTTPS web service: static UI + WebSocket signalling.
+# Actual file contents stay in browser-to-browser WebRTC DataChannels.
+services:
+  - type: web
+    name: lan-room-transfer
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
