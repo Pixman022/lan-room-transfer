@@ -7,6 +7,8 @@ import { generateRandomRoomCode, normalizeRoomCode } from './room-code.js';
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
 const MAX_FILES = 20;
+const PEER_CONNECT_TIMEOUT_MS = 15000;
+const PEER_MAX_ATTEMPTS = 3;
 const RECONNECT_MAX_DELAY_MS = 15000;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
@@ -251,27 +253,45 @@ function dropPeer(id, generation) {
   renderPeers(); renderRequests(); renderJobs();
   return true;
 }
-async function createPeer(id, name, initiator, generation) {
+function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
+  clearTimeout(peer.connectTimer);
+  peer.connectTimer = setTimeout(() => {
+    if (state.peers.get(peer.id) !== peer || peer.ready ||
+        peer.pc.connectionState === 'closed' ||
+        state.ws?.readyState !== WebSocket.OPEN) return;
+    if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS) {
+      peer.reason = '正在重新协商直连';
+      renderPeers();
+      void createPeer(peer.id, peer.name, true, peer.generation, peer.attempt + 1, true)
+        .catch(err => { recordSignalError(err.message); feedback('重新协商失败', true); });
+    } else if (!peer.initiator && peer.attempt > 0 &&
+               peer.retryRequests < PEER_MAX_ATTEMPTS - 1) {
+      peer.retryRequests += 1;
+      peer.reason = '已请求对方重新协商';
+      sendSignal(peer.id, { type: 'retry', attempt: peer.attempt });
+      schedulePeerTimeout(peer);
+      renderPeers();
+    } else {
+      peer.reason = '直连多次尝试未成功：请检查设备网络或防火墙';
+      renderPeers();
+    }
+  }, delay);
+}
+async function createPeer(id, name, initiator, generation, attempt = initiator ? 1 : 0, force = false) {
   if (!generation) return null;
   const previous = state.peers.get(id);
-  if (previous?.generation === generation) return previous;
+  if (previous?.generation === generation && !force) return previous;
   if (previous) dropPeer(id, previous.generation);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
-  const peer = { id, name, generation, pc, channel: null, verified: false, remoteReady: false,
+  const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
+    pc, channel: null, verified: false, remoteReady: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, startedAt: Date.now(), connectTimer: null };
   state.peers.set(id, peer);
-  // Do not leave the UI stuck in an indefinite 'connecting' state.
-  // The PC is not closed: a late successful connection may still recover.
-  peer.connectTimer = setTimeout(() => {
-    if (state.peers.get(id) !== peer || peer.ready || pc.connectionState === 'closed') return;
-    if (peer.channel?.readyState !== 'open' &&
-        (peer.reason === '正在建立连接' || peer.reason === '正在检查 P2P 连接')) {
-      peer.reason = '连接超时：请检查 Wi-Fi、VPN 或访客网络隔离';
-      renderPeers();
-    }
-  }, 12000);
+  // A stuck ICE negotiation must actually create a fresh connection attempt,
+  // rather than only replacing the text with a timeout warning.
+  schedulePeerTimeout(peer);
   pc.onicecandidate = event => {
     if (!event.candidate || state.peers.get(id) !== peer) return;
     const candidate = event.candidate.toJSON();
@@ -281,7 +301,7 @@ async function createPeer(id, name, initiator, generation) {
     if (candidate.candidate !== '') peer.candidateCount += 1;
     // A candidate can be emitted during setLocalDescription, before SDP is sent.
     // Buffer locally until offer/answer has been delivered in signaling order.
-    if (peer.localSdpSent) sendSignal(id, { type: 'candidate', candidate });
+    if (peer.localSdpSent) sendSignal(id, { type: 'candidate', attempt: peer.attempt, candidate });
     else peer.localCandidates.push(candidate);
   };
   pc.onconnectionstatechange = () => {
@@ -290,6 +310,7 @@ async function createPeer(id, name, initiator, generation) {
       peer.ready = false;
       peer.reason = `连接状态：${pc.connectionState}`;
       if (state.active?.peerId === id) failActive('设备连接中断');
+      if (pc.connectionState !== 'closed') schedulePeerTimeout(peer, 5000);
     } else if (pc.connectionState === 'connected' && !peer.ready) {
       peer.reason = '正在检查 P2P 连接';
     }
@@ -299,7 +320,8 @@ async function createPeer(id, name, initiator, generation) {
     if (state.peers.get(id) !== peer) return;
     if (pc.iceConnectionState === 'failed') {
       peer.ready = false;
-      peer.reason = '\u0049\u0043\u0045 \u68c0\u67e5\u5931\u8d25\uff1a\u8bf7\u68c0\u67e5\u662f\u5426\u5728\u540c\u4e00 Wi-Fi\u3001\u8bbf\u5ba2\u9694\u79bb\u6216 VPN';
+      peer.reason = 'ICE 检查失败，准备重新协商';
+      schedulePeerTimeout(peer, 2500);
     }
     renderPeers();
   };
@@ -315,31 +337,52 @@ async function createPeer(id, name, initiator, generation) {
 
 function sendLocalDescription(peer, type) {
   if (state.peers.get(peer.id) !== peer) return;
-  sendSignal(peer.id, { type, sdp: peer.pc.localDescription.sdp });
+  sendSignal(peer.id, { type, attempt: peer.attempt, sdp: peer.pc.localDescription.sdp });
   peer.stage = `${type}-sent`;
   peer.localSdpSent = true;
   for (const candidate of peer.localCandidates.splice(0)) {
-    sendSignal(peer.id, { type: 'candidate', candidate });
+    sendSignal(peer.id, { type: 'candidate', attempt: peer.attempt, candidate });
   }
 }
 async function handleSignal(id, fromGeneration, signal) {
-  if (!signal || !['offer', 'answer', 'candidate'].includes(signal.type)) return;
-  // Late messages from an already-offline or replaced session must not create
-  // ghost peers or contaminate the new incarnation's ICE candidates.
-  const peer = state.peers.get(id);
+  if (!signal || !['offer', 'answer', 'candidate', 'retry'].includes(signal.type) ||
+      !Number.isInteger(signal.attempt) || signal.attempt < 0 ||
+      signal.attempt > PEER_MAX_ATTEMPTS) return;
+  // Both the member generation and the ICE attempt must match. Old trickled
+  // candidates cannot affect a newly constructed RTCPeerConnection.
+  let peer = state.peers.get(id);
   if (!peer || peer.generation !== fromGeneration) return;
+  if (signal.type === 'retry') {
+    if (peer.initiator && !peer.ready && signal.attempt === peer.attempt &&
+        peer.attempt < PEER_MAX_ATTEMPTS) {
+      await createPeer(id, peer.name, true, peer.generation, peer.attempt + 1, true);
+    }
+    return;
+  }
   if (signal.type === 'offer') {
+    if (peer.initiator || signal.attempt < 1 || signal.attempt < peer.attempt) return;
+    if (signal.attempt > peer.attempt) {
+      if (peer.attempt === 0 && !peer.pc.remoteDescription) {
+        peer.attempt = signal.attempt;
+      } else {
+        peer = await createPeer(id, peer.name, false, peer.generation, signal.attempt, true);
+      }
+    } else if (peer.pc.remoteDescription) {
+      return; // duplicate offer for the current attempt
+    }
     peer.stage = 'offer-received';
     await peer.pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
     await flushCandidates(peer);
     const answer = await peer.pc.createAnswer();
     await peer.pc.setLocalDescription(answer);
     sendLocalDescription(peer, 'answer');
-  } else if (signal.type === 'answer') {
+  } else if (signal.attempt === peer.attempt && signal.type === 'answer') {
+    if (!peer.initiator || peer.pc.remoteDescription) return;
     peer.stage = 'answer-received';
     await peer.pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
     await flushCandidates(peer);
-  } else if (signal.candidate && typeof signal.candidate.candidate === 'string' &&
+  } else if (signal.attempt === peer.attempt && signal.candidate &&
+             typeof signal.candidate.candidate === 'string' &&
              (signal.candidate.candidate === '' || isHostCandidateLine(signal.candidate.candidate))) {
     if (signal.candidate.candidate !== '') peer.remoteCandidateCount = (peer.remoteCandidateCount || 0) + 1;
     if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(signal.candidate);
@@ -354,11 +397,23 @@ function attachChannel(peer, channel) {
   peer.channel = channel;
   channel.binaryType = 'arraybuffer';
   channel.bufferedAmountLowThreshold = 128 * 1024;
-  channel.onmessage = event => receiveChannel(peer, event.data);
-  channel.onclose = () => { peer.ready = false; peer.reason = '文件通道已断开'; renderPeers(); };
-  channel.onerror = () => { peer.ready = false; peer.reason = '文件通道错误'; renderPeers(); };
+  channel.onmessage = event => {
+    if (state.peers.get(peer.id) === peer) receiveChannel(peer, event.data);
+  };
+  channel.onclose = () => {
+    if (state.peers.get(peer.id) !== peer) return;
+    peer.ready = false; peer.reason = '文件通道已断开';
+    schedulePeerTimeout(peer, 5000); renderPeers();
+  };
+  channel.onerror = () => {
+    if (state.peers.get(peer.id) !== peer) return;
+    peer.ready = false; peer.reason = '文件通道错误';
+    schedulePeerTimeout(peer, 5000); renderPeers();
+  };
   channel.onopen = async () => {
-    for (let count = 0; count < 20 && channel.readyState === 'open'; count += 1) {
+    if (state.peers.get(peer.id) !== peer) return;
+    for (let count = 0; count < 20 && channel.readyState === 'open' &&
+         state.peers.get(peer.id) === peer; count += 1) {
       let verdict;
       try { verdict = await inspectSelectedPath(peer.pc); }
       catch (err) { verdict = { allowed: false, reason: `路径检查失败：${err.message}` }; }
@@ -382,6 +437,7 @@ function attachChannel(peer, channel) {
       renderPeers();
       await new Promise(resolve => setTimeout(resolve, 600));
     }
+    if (state.peers.get(peer.id) !== peer) return;
     peer.reason = `拒绝传输：${peer.reason}`;
     peer.ready = false;
     renderPeers();
@@ -675,6 +731,11 @@ function diagnosticsSnapshot() {
       peerVerified: Boolean(peer.remoteReady),
       route: peer.routeInfo,
       stage: peer.stage || 'unknown',
+      attempt: peer.attempt,
+      signalingState: peer.pc?.signalingState ?? 'unknown',
+      iceGathering: peer.pc?.iceGatheringState ?? 'unknown',
+      localDescriptionSet: Boolean(peer.pc?.localDescription),
+      remoteDescriptionSet: Boolean(peer.pc?.remoteDescription),
       elapsedSeconds: Math.floor((Date.now() - (peer.startedAt || Date.now())) / 1000),
       candidatesSent: peer.candidateCount || 0,
       candidatesReceived: peer.remoteCandidateCount || 0,
