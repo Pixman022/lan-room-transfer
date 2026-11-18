@@ -273,3 +273,34 @@ test('responder requests a new offer after answer-sent hangs in ICE new', async 
   await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
   assert.equal(peer2.pc.candidates.length,1);
 });
+
+test('healthy open DataChannel is not replaced when connection timer fires', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  const peer=t.state.peers.get('other');
+  const initialPackets=socket.sent.length;
+  peer.channel.readyState='open';
+  fireNextTimer(t);
+  assert.equal(t.state.peers.get('other'),peer);
+  assert.equal(peer.pc.connectionState,'new');
+  assert.equal(socket.sent.length,initialPackets);
+});
+
+test('disconnected ICE transport schedules a bounded early retry', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  const original=t.state.peers.get('other');
+  original.pc.connectionState='disconnected';
+  original.pc.onconnectionstatechange();
+  assert.equal([...t.timers.values()][0].ms,5000);
+  fireNextTimer(t);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(t.state.peers.get('other').attempt,2);
+  assert.equal(original.pc.connectionState,'closed');
+});
