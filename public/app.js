@@ -312,6 +312,21 @@ function dropPeer(id, generation) {
   renderPeers(); renderRequests(); renderJobs();
   return true;
 }
+async function switchInitialOfferRole(peer, notifyRemote = false) {
+  // After a failed first connection attempt, let the other side create the
+  // offer. This helps asymmetric browser ICE behavior without guessing UA type.
+  // Both sides may time out simultaneously: the transition is idempotent.
+  const firstAttempt = peer.originalInitiator ? peer.attempt === 1 : peer.attempt <= 1;
+  if (state.peers.get(peer.id) !== peer || !firstAttempt ||
+      peer.initiator !== peer.originalInitiator || peer.ready ||
+      peer.pc.connectionState === 'closed' ||
+      (peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected')) return false;
+  tracePeer(peer, 'peer.offer-role-switch', { nextAttempt: 2, notifyRemote,
+    nextInitiator: !peer.originalInitiator });
+  if (notifyRemote) sendSignal(peer.id, { type: 'role-switch', attempt: 1 });
+  await createPeer(peer.id, peer.name, !peer.originalInitiator, peer.generation, 2, true);
+  return true;
+}
 function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
   clearTimeout(peer.connectTimer);
   tracePeer(peer, 'peer.connect.timeout.scheduled', { delayMs: delay });
@@ -323,7 +338,10 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
         (peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected' &&
          peer.pc.iceConnectionState !== 'failed') ||
         state.ws?.readyState !== WebSocket.OPEN) return;
-    if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS) {
+    if (peer.attempt <= 1 && peer.initiator === peer.originalInitiator) {
+      void switchInitialOfferRole(peer, true)
+        .catch(err => { recordSignalError(err.message); feedback('切换协商方向失败', true); });
+    } else if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS) {
       tracePeer(peer, 'peer.renegotiate.initiator', { nextAttempt: peer.attempt + 1 });
       peer.reason = '正在重新协商直连';
       renderPeers();
@@ -348,9 +366,11 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   if (!generation) return null;
   const previous = state.peers.get(id);
   if (previous?.generation === generation && !force) return previous;
+  const originalInitiator = previous?.generation === generation
+    ? previous.originalInitiator : initiator;
   if (previous) dropPeer(id, previous.generation);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
-  const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
+  const peer = { id, name, generation, initiator, originalInitiator, attempt, retryRequests: 0,
     pc, channel: null, verified: false, remoteReady: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
@@ -438,7 +458,7 @@ function sendLocalDescription(peer, type) {
 }
 async function handleSignal(id, fromGeneration, signal) {
   trace('webrtc.handleSignal', { from: id, fromGeneration, signal });
-  if (!signal || !['offer', 'answer', 'candidate', 'retry'].includes(signal.type) ||
+  if (!signal || !['offer', 'answer', 'candidate', 'retry', 'role-switch'].includes(signal.type) ||
       !Number.isInteger(signal.attempt) || signal.attempt < 0 ||
       signal.attempt > PEER_MAX_ATTEMPTS) return;
   // Both the member generation and the ICE attempt must match. Old trickled
@@ -447,6 +467,10 @@ async function handleSignal(id, fromGeneration, signal) {
   if (!peer || peer.generation !== fromGeneration) {
     trace('webrtc.signal.ignored.generation', { from: id, fromGeneration,
       knownGeneration: peer?.generation, signal });
+    return;
+  }
+  if (signal.type === 'role-switch') {
+    if (signal.attempt === 1) await switchInitialOfferRole(peer);
     return;
   }
   if (signal.type === 'retry') {
@@ -458,6 +482,13 @@ async function handleSignal(id, fromGeneration, signal) {
     return;
   }
   if (signal.type === 'offer') {
+    // A new offer from the former responder can arrive just before its
+    // role-switch message. Accept attempt 2 by yielding the offerer role.
+    if (peer.originalInitiator && peer.initiator && peer.attempt === 1 &&
+        signal.attempt === 2) {
+      await switchInitialOfferRole(peer);
+      peer = state.peers.get(id);
+    }
     if (peer.initiator || signal.attempt < 1 || signal.attempt < peer.attempt) return;
     if (signal.attempt > peer.attempt) {
       if (peer.attempt === 0 && !peer.pc.remoteDescription) {
