@@ -79,6 +79,24 @@ class RoomUnitTests(unittest.TestCase):
         rooms.sweep()
         self.assertNotIn("ROOM2026", rooms.rooms)
 
+    def test_authenticated_refresh_reuses_member_and_replaces_socket(self):
+        rooms = RoomRegistry()
+        class StubWs:
+            closed = False
+        old_ws, new_ws = StubWs(), StubWs()
+        room, original, _ = rooms.enter("ABCD", "Phone", old_ws)
+        old_generation = original.generation
+        resumed, same_member, created = rooms.enter(
+            "ABCD", "Phone", new_ws, original.id, original.token)
+        self.assertIs(resumed, room)
+        self.assertIs(same_member, original)
+        self.assertFalse(created)
+        self.assertNotEqual(same_member.generation, old_generation)
+        self.assertEqual(len(room.online()), 1)
+        rooms.leave(room, original, old_ws)
+        self.assertIs(original.ws, new_ws)
+        self.assertIsNone(room.empty_at)
+
     def test_invalid_codes(self):
         rooms = RoomRegistry()
         for code in ("abc", "with-space", "a" * 17, "a_4c", None):
@@ -104,11 +122,11 @@ class SignallingTests(AioHTTPTestCase):
         self.assertEqual(welcome_b["peers"][0]["name"], "Laptop")
         self.assertFalse(welcome_b["created"])
         self.assertEqual((await a.receive_json())["type"], "peer-online")
-        await a.send_json({"type": "signal", "to": welcome_b["id"],
+        await a.send_json({"type": "signal", "to": welcome_b["id"], "toGeneration": welcome_b["generation"],
                            "signal": {"type": "file-chunk", "data": "file bytes"}})
         error = await a.receive_json()
         self.assertEqual(error["type"], "error")
-        await a.send_json({"type": "signal", "to": welcome_b["id"],
+        await a.send_json({"type": "signal", "to": welcome_b["id"], "toGeneration": welcome_b["generation"],
                            "signal": {"type": "offer", "sdp": "fake sdp"}})
         forwarded = await b.receive_json()
         self.assertEqual(forwarded["type"], "signal")
@@ -116,6 +134,55 @@ class SignallingTests(AioHTTPTestCase):
         await b.close()
         self.assertEqual((await a.receive_json())["type"], "peer-offline")
         await a.close()
+
+    async def test_rapid_refresh_replaces_socket_and_rejects_stale_generation(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        a = await self.client.ws_connect("/ws", headers=origin)
+        await a.send_json({"type": "enter", "code": "REJOIN", "name": "A"})
+        a_join = await a.receive_json()
+        b = await self.client.ws_connect("/ws", headers=origin)
+        await b.send_json({"type": "enter", "code": "REJOIN", "name": "B"})
+        first_b = await b.receive_json()
+        original_online = await a.receive_json()
+        self.assertEqual(original_online["type"], "peer-online")
+        self.assertEqual(original_online["generation"], first_b["generation"])
+
+        # The replacement arrives before the old websocket has fully closed.
+        new_b = await self.client.ws_connect("/ws", headers=origin)
+        await new_b.send_json({"type": "enter", "code": "REJOIN", "name": "B",
+                               "id": first_b["id"], "token": first_b["token"]})
+        offline = await a.receive_json()
+        self.assertEqual(offline, {"type": "peer-offline", "id": first_b["id"],
+                                   "generation": first_b["generation"]})
+        resumed = await new_b.receive_json()
+        self.assertEqual(resumed["id"], first_b["id"])
+        self.assertNotEqual(resumed["generation"], first_b["generation"])
+        online = await a.receive_json()
+        self.assertEqual(online["type"], "peer-online")
+        self.assertEqual(online["generation"], resumed["generation"])
+        await asyncio.sleep(0.04)
+        members = self.app["registry"].rooms["REJOIN"].online()
+        self.assertEqual(len(members), 2)
+        self.assertEqual({m.id for m in members}, {a_join["id"], first_b["id"]})
+
+        # An old ICE/SDP target cannot contaminate the replacement socket.
+        await a.send_json({"type": "signal", "to": first_b["id"],
+                           "toGeneration": first_b["generation"],
+                           "signal": {"type": "offer", "sdp": "stale"}})
+        denied = await a.receive_json()
+        self.assertEqual(denied["type"], "peer-unavailable")
+        self.assertEqual(denied["generation"], first_b["generation"])
+
+        await a.send_json({"type": "signal", "to": first_b["id"],
+                           "toGeneration": resumed["generation"],
+                           "signal": {"type": "offer", "sdp": "new"}})
+        forwarded = await new_b.receive_json()
+        self.assertEqual(forwarded["type"], "signal")
+        self.assertEqual(forwarded["fromGeneration"], a_join["generation"])
+        self.assertEqual(forwarded["signal"]["sdp"], "new")
+        await a.close()
+        await new_b.close()
+        await b.close()
 
     async def test_device_rename_broadcast_preserves_member_identity(self):
         origin = {"Origin": str(self.server.make_url("/"))[:-1]}
@@ -147,17 +214,17 @@ class SignallingTests(AioHTTPTestCase):
         await b.send_json({"type": "enter", "code": "EOCROOM", "name": "B"})
         b_welcome = await b.receive_json()
         await a.receive_json()  # peer-online
-        await a.send_json({"type": "signal", "to": b_welcome["id"], "signal": {
+        await a.send_json({"type": "signal", "to": b_welcome["id"], "toGeneration": b_welcome["generation"], "signal": {
             "type": "candidate", "candidate": {"candidate": "", "sdpMid": "0", "sdpMLineIndex": 0}}})
         forwarded = await b.receive_json()
         self.assertEqual(forwarded["signal"]["candidate"]["candidate"], "")
         # Valid host candidates may end with "typ host" (no trailing space).
         host = "candidate:1 1 udp 100 192.168.1.5 5555 typ host"
         for raw in [host, host + " generation 0"]:
-            await a.send_json({"type": "signal", "to": b_welcome["id"], "signal": {
+            await a.send_json({"type": "signal", "to": b_welcome["id"], "toGeneration": b_welcome["generation"], "signal": {
                 "type": "candidate", "candidate": {"candidate": raw, "sdpMid": "0"}}})
             self.assertEqual((await b.receive_json())["signal"]["candidate"]["candidate"], raw)
-        await a.send_json({"type": "signal", "to": b_welcome["id"], "signal": {
+        await a.send_json({"type": "signal", "to": b_welcome["id"], "toGeneration": b_welcome["generation"], "signal": {
             "type": "candidate", "candidate": {
                 "candidate": "candidate:1 1 udp 1 203.0.113.1 11111 typ srflx", "sdpMid": "0"}}})
         self.assertEqual((await a.receive_json())["type"], "error")
@@ -212,8 +279,11 @@ class SignallingTests(AioHTTPTestCase):
         await a.receive_json()
         await a.send_bytes(b"This is a file byte payload")
         self.assertEqual((await a.receive_json())["type"], "error")
-        await a.send_json({"type": "signal", "to": "missing", "signal": {"type": "offer", "sdp": "abc"}})
-        self.assertEqual((await a.receive_json())["type"], "error")
+        await a.send_json({"type": "signal", "to": "missing", "toGeneration": "old",
+                           "signal": {"type": "offer", "sdp": "abc"}})
+        unavailable = await a.receive_json()
+        self.assertEqual(unavailable["type"], "peer-unavailable")
+        self.assertEqual(unavailable["id"], "missing")
         await a.close()
 
     async def test_resume_and_origin_rejection(self):
