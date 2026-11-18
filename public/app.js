@@ -258,6 +258,7 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
   peer.connectTimer = setTimeout(() => {
     if (state.peers.get(peer.id) !== peer || peer.ready ||
         peer.pc.connectionState === 'closed' ||
+        (peer.channel?.readyState === 'open' && peer.pc.connectionState !== 'failed') ||
         state.ws?.readyState !== WebSocket.OPEN) return;
     if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS) {
       peer.reason = '正在重新协商直连';
@@ -265,6 +266,7 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
       void createPeer(peer.id, peer.name, true, peer.generation, peer.attempt + 1, true)
         .catch(err => { recordSignalError(err.message); feedback('重新协商失败', true); });
     } else if (!peer.initiator && peer.attempt > 0 &&
+               peer.attempt < PEER_MAX_ATTEMPTS &&
                peer.retryRequests < PEER_MAX_ATTEMPTS - 1) {
       peer.retryRequests += 1;
       peer.reason = '已请求对方重新协商';
@@ -354,7 +356,7 @@ async function handleSignal(id, fromGeneration, signal) {
   if (!peer || peer.generation !== fromGeneration) return;
   if (signal.type === 'retry') {
     if (peer.initiator && !peer.ready && signal.attempt === peer.attempt &&
-        peer.attempt < PEER_MAX_ATTEMPTS) {
+        peer.channel?.readyState !== 'open' && peer.attempt < PEER_MAX_ATTEMPTS) {
       await createPeer(id, peer.name, true, peer.generation, peer.attempt + 1, true);
     }
     return;
