@@ -53,6 +53,32 @@ function harness() {
     send(data) { this.sent.push(JSON.parse(data)); }
     close() { this.readyState = 3; this.emit('close'); }
   }
+  class FakeRTCPeerConnection {
+    static instances = [];
+    constructor() {
+      this.connectionState = 'new';
+      this.iceConnectionState = 'new';
+      this.iceGatheringState = 'new';
+      this.signalingState = 'stable';
+      this.localDescription = null;
+      this.remoteDescription = null;
+      this.candidates = [];
+      FakeRTCPeerConnection.instances.push(this);
+    }
+    createDataChannel() { return {readyState:'connecting',bufferedAmount:0,send(){}}; }
+    async createOffer() { return {type:'offer', sdp:'offer-sdp'}; }
+    async createAnswer() { return {type:'answer', sdp:'answer-sdp'}; }
+    async setLocalDescription(value) {
+      this.localDescription = value;
+      this.signalingState = value.type === 'offer' ? 'have-local-offer' : 'stable';
+    }
+    async setRemoteDescription(value) {
+      this.remoteDescription = value;
+      this.signalingState = 'stable';
+    }
+    async addIceCandidate(candidate) { this.candidates.push(candidate); }
+    close() { this.connectionState = 'closed'; this.signalingState='closed'; }
+  }
   const context = vm.createContext({
     window: { localStorage: sessionStorage, addEventListener() {} },
     document: {
@@ -63,6 +89,7 @@ function harness() {
     sessionStorage,
     location: { protocol: 'https:', host: 'test.example' },
     WebSocket: FakeWebSocket,
+    RTCPeerConnection: FakeRTCPeerConnection,
     setTimeout: (cb, ms) => { const id = ++nextTimer; timers.set(id, {cb, ms}); return id; },
     clearTimeout: id => timers.delete(id),
     queueMicrotask,
@@ -78,7 +105,7 @@ function harness() {
   });
   vm.runInContext(appSource, context, {filename:'app.js'});
   const run = expression => vm.runInContext(expression, context);
-  return {state: run('state'), run, timers, elements, FakeWebSocket};
+  return {state: run('state'), run, timers, elements, FakeWebSocket, FakeRTCPeerConnection};
 }
 const join = async (t, socket, generation='gen-1') => {
   socket.open();
@@ -173,4 +200,74 @@ test('temporary room-entry rejection during recovery continues backoff', async (
   assert.equal(t.state.code,'5832');
   assert.equal(t.timers.size,1);
   assert.equal([...t.timers.values()][0].ms,2000);
+});
+
+test('initiator replaces stalled ICE attempts and ignores old answers and candidates', async () => {
+  const t = harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket = t.FakeWebSocket.sockets[0];
+  await join(t, socket);
+  await t.run('createPeer("other", "Sky Deer", true, "gen-peer")');
+  assert.equal(t.state.peers.get('other').attempt, 1);
+  assert.deepEqual(socket.sent.at(-1).signal, {type:'offer',attempt:1,sdp:'offer-sdp'});
+  assert.equal(t.FakeRTCPeerConnection.instances.length, 1);
+  assert.equal([...t.timers.values()][0].ms, 15000);
+
+  fireNextTimer(t);
+  await new Promise(resolve => setImmediate(resolve));
+  const peer2=t.state.peers.get('other');
+  assert.equal(peer2.attempt, 2);
+  assert.equal(t.FakeRTCPeerConnection.instances[0].connectionState, 'closed');
+  assert.equal(t.FakeRTCPeerConnection.instances.length, 2);
+  assert.equal(socket.sent.at(-1).signal.attempt, 2);
+
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:1,sdp:"stale"})');
+  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 7777 typ host"}})');
+  assert.equal(peer2.pc.remoteDescription,null);
+  assert.equal(peer2.pc.candidates.length,0);
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:2,sdp:"fresh"})');
+  assert.equal(peer2.pc.remoteDescription.sdp, 'fresh');
+  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.3 7778 typ host"}})');
+  assert.equal(peer2.pc.candidates.length,1);
+
+  await t.run('handleSignal("other","gen-peer",{type:"retry",attempt:2})');
+  assert.equal(t.state.peers.get('other').attempt,3);
+  assert.equal(socket.sent.at(-1).signal.attempt,3);
+  fireNextTimer(t);
+  assert.equal(t.state.peers.get('other').attempt,3,'retry stops at 3 attempts');
+  assert.match(t.state.peers.get('other').reason,/多次尝试未成功/);
+});
+
+test('responder requests a new offer after answer-sent hangs in ICE new', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('handleServer({type:"peer-online",id:"other",name:"Sky Deer",generation:"gen-peer"})');
+  const peer0=t.state.peers.get('other');
+  assert.equal(peer0.attempt,0);
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:1,sdp:"initial"})');
+  const peer1=t.state.peers.get('other');
+  assert.equal(peer1.stage,'answer-sent');
+  assert.equal(peer1.attempt,1);
+  assert.equal(peer1.pc.remoteDescription.sdp,'initial');
+  assert.equal(socket.sent.at(-1).signal.attempt,1);
+
+  fireNextTimer(t);
+  const request=socket.sent.at(-1);
+  assert.equal(request.signal.type,'retry');
+  assert.equal(request.signal.attempt,1);
+  assert.equal(t.state.peers.get('other'),peer1);
+
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:2,sdp:"retry-offer"})');
+  const peer2=t.state.peers.get('other');
+  assert.notEqual(peer2,peer1);
+  assert.equal(peer1.pc.connectionState,'closed');
+  assert.equal(peer2.stage,'answer-sent');
+  assert.equal(peer2.attempt,2);
+  assert.equal(peer2.pc.remoteDescription.sdp,'retry-offer');
+  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
+  assert.equal(peer2.pc.candidates.length,0);
+  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
+  assert.equal(peer2.pc.candidates.length,1);
 });
