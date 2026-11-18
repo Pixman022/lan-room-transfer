@@ -1,7 +1,9 @@
-/** A deliberately conservative research gate, not an OS-level LAN guarantee.
- * Reject if the browser hides addresses, if a relay is involved, if an IPv6/VPN
- * address is observed, or if private IPv4 peers aren't in the same /24.
- * A private /24 match still cannot prove a physical LAN; see docs/limitations.md.
+/** Restricted P2P mode: require the selected ICE pair to be host/host and
+ * reject known public/unsupported addresses and conflicting private subnets.
+ * mDNS/hidden addresses are accepted only when both selected candidates are
+ * explicitly typed host. This DOES NOT prove a physical LAN: VPNs or routed
+ * private networks may still carry traffic beyond the local network.
+ * File bytes must never be relayed by the signalling server or TURN.
  */
 // ICE candidates may end immediately after "typ host" (without extension attributes).
 // Keep the filter host-only; it does not by itself prove a local network route.
@@ -50,24 +52,30 @@ export function assessPair(local, remote) {
 
   const localKind = candidateAddressKind(local);
   const remoteKind = candidateAddressKind(remote);
-  if (localKind !== 'private-ipv4' || remoteKind !== 'private-ipv4') {
-    const kinds = [localKind, remoteKind];
-    if (kinds.includes('mdns'))
-      return result(false, 'mdns-obfuscated', '浏览器使用 mDNS 隐藏了候选地址，无法验证双方是否在同一网段', local, remote);
-    if (kinds.some(k => k === 'hidden' || k === 'redacted'))
-      return result(false, 'address-hidden', '浏览器隐藏了候选 IP 地址，无法验证双方是否在同一网段', local, remote);
+  const obscured = kind => ['mdns', 'hidden', 'redacted'].includes(kind);
+  const kinds = [localKind, remoteKind];
+  // Never allow an explicitly visible public/unsupported address simply because
+  // the other candidate was masked. Known non-local cases remain blocked.
+  if (kinds.some(kind => kind !== 'private-ipv4' && !obscured(kind))) {
     if (kinds.includes('ipv6'))
-      return result(false, 'ipv6-unsupported', '连接使用了 IPv6 地址，当前只验证私有 IPv4 网段', local, remote);
-    return result(false, 'unsupported-address', '连接候选不是受支持的私有 IPv4 地址，无法验证局域网路径', local, remote);
+      return result(false, 'ipv6-unsupported', '连接使用了可见 IPv6 地址，当前不支持', local, remote);
+    return result(false, 'unsupported-address', '连接包含可见的非私有 IPv4 地址，拒绝传输', local, remote);
   }
-  const a = parseIPv4(local.address ?? local.ip);
-  const b = parseIPv4(remote.address ?? remote.ip);
-  if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2])
-    return result(false, 'subnet-mismatch', '连接两端不在相同的私有 IPv4 /24 网段', local, remote);
-  if (a.every((v, i) => v === b[i]))
-    return result(false, 'same-address', '两端地址相同，原型不验证同一设备的标签页传输', local, remote);
-  return result(true, 'private-ipv4-host-pair',
-    '候选地址满足保守 /24 检查（不代表已证明物理 LAN 路由）', local, remote);
+  if (kinds.every(kind => kind === 'private-ipv4')) {
+    const a = parseIPv4(local.address ?? local.ip);
+    const b = parseIPv4(remote.address ?? remote.ip);
+    if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2])
+      return result(false, 'subnet-mismatch', '连接两端不在相同的私有 IPv4 /24 网段', local, remote);
+    if (a.every((v, i) => v === b[i]))
+      return result(false, 'same-address', '两端地址相同，原型不验证同一设备的标签页传输', local, remote);
+    return result(true, 'private-ipv4-host-pair',
+      '已建立私有 IPv4 host P2P 连接（不保证流量仅经过局域网）', local, remote);
+  }
+  // A fully established WebRTC channel with selected host/host candidates may
+  // still hide one/both addresses. Permit it under the explicitly chosen
+  // restricted P2P policy, not under an absolute LAN-only guarantee.
+  return result(true, 'masked-host-p2p',
+    '已建立 host P2P 连接；浏览器隐藏地址，不能保证只经过局域网', local, remote);
 }
 
 export async function inspectSelectedPath(pc) {

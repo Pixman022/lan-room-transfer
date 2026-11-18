@@ -23,16 +23,24 @@ test('only same private /24 host pair can pass conservative gate', () => {
   assert.equal(pair('192.168.1.3', '192.168.1.3').allowed, false);
 });
 
-test('relay, public, loopback, mdns, ipv6 and opaque addresses fail closed', () => {
+test('restricted P2P accepts masked host addresses but not explicit unsafe paths', () => {
   assert.equal(pair('192.168.1.3', '192.168.1.4', 'host', 'relay').allowed, false);
+  assert.equal(pair('192.168.1.3', '192.168.1.4', 'srflx', 'host').allowed, false);
   assert.equal(pair('192.168.1.3', '8.8.8.8').allowed, false);
   assert.equal(pair('127.0.0.1', '127.0.0.2').allowed, false);
-  assert.equal(pair('test.local', '192.168.1.4').allowed, false);
-  assert.equal(pair('test.local', '192.168.1.4').code, 'mdns-obfuscated');
-  assert.equal(pair(undefined, '192.168.1.4').code, 'address-hidden');
+  assert.equal(pair('test.local', '192.168.1.4').allowed, true);
+  assert.equal(pair('test.local', '192.168.1.4').code, 'masked-host-p2p');
+  assert.equal(pair(undefined, '192.168.1.4').allowed, true);
+  assert.equal(pair(undefined, '192.168.1.4').code, 'masked-host-p2p');
+  assert.equal(pair('test.local', undefined).allowed, true);
+  assert.equal(pair(undefined, undefined).allowed, true);
+  assert.equal(pair('0.0.0.0', '192.168.1.4').allowed, true);
+  assert.equal(pair('192.168.1.4', '8.8.8.8').allowed, false);
+  assert.equal(pair('8.8.8.8', undefined).allowed, false);
   assert.equal(pair('fc00::1', 'fc00::2').allowed, false);
   assert.equal(pair('100.64.0.1', '100.64.0.2').allowed, false);
-  assert.equal(pair(undefined, '192.168.1.4').allowed, false);
+  assert.equal(pair('machine.example', '192.168.1.4').allowed, false);
+  assert.equal(pair('test.local', '192.168.1.4', 'host', 'relay').allowed, false);
   assert.equal(parseIPv4('999.1.1.1'), null);
 });
 
@@ -46,14 +54,17 @@ test('selected candidate stats must be readable and host/private', async () => {
   assert.equal((await inspectSelectedPath({getStats: async () => good})).allowed, true);
   good.set('b', {type: 'remote-candidate', candidateType: 'host', address: 'f00.local'});
   const mdns = await inspectSelectedPath({getStats: async () => good});
-  assert.equal(mdns.allowed, false);
-  assert.equal(mdns.code, 'mdns-obfuscated');
+  assert.equal(mdns.allowed, true);
+  assert.equal(mdns.code, 'masked-host-p2p');
   assert.equal(mdns.remoteAddressKind, 'mdns');
   assert.equal(mdns.localAddressKind, 'private-ipv4');
   good.set('b', {type: 'remote-candidate', candidateType: 'host', address: null});
   const hidden = await inspectSelectedPath({getStats: async () => good});
-  assert.equal(hidden.code, 'address-hidden');
+  assert.equal(hidden.allowed, true);
+  assert.equal(hidden.code, 'masked-host-p2p');
   assert.equal(hidden.remoteAddressKind, 'hidden');
+  good.set('b', {type: 'remote-candidate', candidateType: 'relay', address: null});
+  assert.equal((await inspectSelectedPath({getStats: async () => good})).allowed, false);
   assert.equal(candidateAddressKind({address: '::'}), 'redacted');
   assert.equal(candidateAddressKind({address: '8.8.8.8'}), 'other-ipv4');
   assert.equal(candidateAddressKind({address: 'fc00::5'}), 'ipv6');
