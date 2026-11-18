@@ -1,6 +1,6 @@
 # LAN Room Product Requirements V1.0 — Confirmed Baseline
 
-**Project:** independent browser LAN file transfer tool, not Fresnica. Name provisional. 2026-11-18.
+**Project:** independent browser P2P file transfer tool, not Fresnica. Name provisional. 2026-11-18. **Network decision amended to restricted B mode on 2026-11-18.**
 
 ## What users must be able to do
 
@@ -18,11 +18,13 @@
 - If the page reloads while a session exists, show that room code for re-entry and silently restore the previous member identity when the session token is still valid. The random numeric code has no separate five-minute joining cutoff.
 - Use rooms without administrators, while maintaining local peer-blocking, request rate limits and explicit file acceptance.
 
-## Nonnegotiable network boundary
+## Approved network boundary — restricted P2P mode
 
-Internet is allowed for accessing the HTTPS page and performing initial signalling/room coordination only. Actual file content must only traverse a direct local connection between devices. No public file relays or cloud storage. If the browser cannot verify a qualifying path, fail closed instead of guessing.
+Internet is allowed for the HTTPS website and room/signalling service. File metadata and contents move directly between browsers over WebRTC DataChannels, never through the signalling server or cloud file storage. No STUN/TURN servers are configured.
 
-**Critical open risk:** Browser-only checks cannot prove physical LAN routing with complete certainty. The product promise is *not yet validated*; this must be resolved before production release.
+Require a selected `host`/`host` ICE candidate pair. Permit mDNS-hidden or redacted candidate addresses when both selected candidate types are confirmed `host`. Continue to reject relay/reflexive pairs, known public/unsupported addresses, known different private IPv4 /24 subnets and identical visible endpoints. If the browser cannot identify a selected pair and its types, fail closed.
+
+**Confirmed trade-off:** The browser-only tool cannot guarantee file bytes remain on a physical LAN; host P2P may traverse a VPN or routed network. Replace any absolute LAN-only marketing statement with “device-to-device P2P transfer; file bytes are not uploaded to our server.” This choice was explicitly approved on 2026-11-18. Share files only with trusted room participants; four-digit room codes are guessable.
 
 ## First delivery scope
 
@@ -30,7 +32,7 @@ Internet is allowed for accessing the HTTPS page and performing initial signalli
 - Compact home and room workspace: presence-only online device list left, shared file drop area on the right, room-wide file catalog with per-file receive/receive-all, sequential receiver queue, and compact device rename. No recipient selection or separate send confirmation.
 - Desktop and mobile responsive UI.
 - User-visible invalid-code, room-full, not-connected, route-blocked and transfer-failed states.
-- Initial supported environment: different devices under the same router and directly reachable private IPv4 network.
+- Primary supported scenario: distinct devices with reachable P2P connections, preferably on the same router/Wi-Fi; physical LAN-only routing is not guaranteed.
 - Do not require complex subnet routing or full offline pairing in the first version.
 
 ## Deferred
@@ -40,7 +42,7 @@ Account systems, persistent room ownership, multi-file concurrent transfer to th
 ## Stage gates
 
 1. P0: Signalling room state, reconnection, no admin and code rules.
-2. P0: Browser-borne path inspection, negatives for distinct networks/VPN/public IPv6, clear fail-closed behavior.
+2. P0: Restricted host-only P2P inspection, negatives for relay/reflexive and explicitly unsafe visible paths, plus VPN/remote-route disclosures.
 3. P1: Real multi-device transfer, sequential file state, cancellation, file-content hash checks.
 4. P1: Android/iOS browser download and memory handling.
 5. Only then: final interactive UX, design system, deployment hardening and V1 release.

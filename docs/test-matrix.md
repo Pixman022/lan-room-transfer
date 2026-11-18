@@ -4,16 +4,16 @@ Status: **partial manual check only** on actual devices. The reported results co
 
 **Connection stability follow-up (2026-11-18):** User reported that establishing a peer connection sometimes takes unusually long and behaves inconsistently. This is an observation, not yet a measured failure rate. Code fixes now serialize incoming SDP/ICE operations, send local SDP before buffered candidates, forward ICE end-of-candidates, and show an explicit status after 12 seconds while permitting late recovery. Do not equate this to verified performance improvement until separate devices repeat the test. For each retry, record `stage`, `elapsedSeconds`, `candidatesSent`, `candidatesReceived`, `ice`, `channel`, and `reason` from the privacy-reduced diagnostics on both devices. Browser automation here could only test mocked peer sequencing, not a genuine routed LAN path.
 
-To collect follow-up evidence, open **诊断** next to the online device count and use **复制诊断** separately on each device. The copied report excludes room code, member names, file names, and network IP addresses. Record whether the status says 房间已连接, 直连未就绪 or 文件直连就绪; also record whether the uploader's file shows 等待设备直连 or 可供 N 台设备接收. Do not infer that "房间已连接" means the file path is ready. The conservative route policy remains active.
+To collect follow-up evidence, open **诊断** next to the online device count and use **复制诊断** separately on each device. The copied report excludes room code, member names, file names, and network IP addresses. Record whether the status says 房间已连接, 直连未就绪 or 文件直连就绪; also record whether the uploader's file shows 等待设备直连 or 可供 N 台设备接收. Do not infer that "房间已连接" means the file path is ready. The approved restricted host-only P2P policy is active; it is not a physical LAN guarantee.
 
 | Case | Setup | Expected outcome | Status |
 |---|---|---|---|
-| LAN-01 | Two real devices on the same Wi-Fi/router, distinct private IPv4 in same /24 | Join same room, verify peer candidates, transfer sample file | Not run |
-| LAN-02 | Two different Wi-Fi networks with internet | Can reach signalling server but **must not** transfer file bytes | Not run |
+| P2P-01 | Two real devices on same Wi-Fi/router with a direct host pair | Join same room, accept masked host addresses, share and download a 1 MB test file; verify saved hash | Not run |
+| P2P-02 | Two different Wi-Fi networks with internet | Verify no cloud relay; host-only peer connectivity may succeed or fail. Record actual path and warn that physical LAN isolation is not guaranteed | Not run |
 | LAN-03 | Two devices on guest Wi-Fi with AP/client isolation | Cannot establish direct connection; clear error | Not run |
 | LAN-04 | Two devices on a VPN exposing similar private IP ranges | Observe and assess whether route heuristic can give false positives | Not run |
-| LAN-05 | IPv6 enabled, global addresses available | No file content sent via global IPv6 or relay | Not run |
-| LAN-06 | Browser reveals mDNS `.local` candidate instead of IPv4 | Deny file transfer and explain compatibility limitation | Not run |
+| P2P-05 | Selected pair exposes global IPv6, relay or reflexive candidates | Reject transfer; no cloud relay or file content | Policy unit tested; field pending |
+| P2P-06 | Selected host pair contains a browser-masked/mDNS address | Allow encrypted P2P transfer if the other safety checks pass; do not claim LAN-only routing | Policy unit tested; real devices pending |
 | ROOM-01 | Three clients join with the same custom code | No approval, online member updates | API tested, browser pending |
 | ROOM-00 | First client enters unused code, second enters same code | Single Enter Room button; first automatically creates, second joins the same room | API tested; browser pending |
 | ROOM-00B | Landing page opens for a new client | English Color + Animal random device name and unused four-digit code are shown; both are editable, one entry action | Name/code unit + offline browser UI tests passed; live pending |

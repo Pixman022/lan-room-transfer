@@ -163,7 +163,7 @@ async function handleServer(msg) {
       if (msg.name !== currentDeviceName) {
         state.ws?.send(JSON.stringify({ type: 'rename', name: currentDeviceName }));
       }
-      feedback('已进入房间，等待设备建立局域网连接');
+      feedback('已进入房间，等待设备 P2P 直连');
       for (const other of msg.peers) await createPeer(other.id, other.name, true);
       renderPeers(); renderRequests(); renderJobs(); renderSentFiles(); break;
     case 'peer-online':
@@ -200,7 +200,7 @@ async function createPeer(id, name, initiator) {
   peer.connectTimer = setTimeout(() => {
     if (state.peers.get(id) !== peer || peer.ready || pc.connectionState === 'closed') return;
     if (peer.channel?.readyState !== 'open' &&
-        (peer.reason === '正在建立连接' || peer.reason === '正在验证局域网路径')) {
+        (peer.reason === '正在建立连接' || peer.reason === '正在检查 P2P 连接')) {
       peer.reason = '连接超时：请检查 Wi-Fi、VPN 或访客网络隔离';
       renderPeers();
     }
@@ -209,7 +209,7 @@ async function createPeer(id, name, initiator) {
     if (!event.candidate) return;
     const candidate = event.candidate.toJSON();
     // Only private-path host candidates and ICE end-of-candidates signaling.
-    // No STUN/TURN, and the file-byte path gate is unchanged.
+    // No STUN/TURN; selected host candidates still pass the restricted P2P policy.
     if (candidate.candidate !== '' && !isHostCandidateLine(candidate.candidate)) return;
     if (candidate.candidate !== '') peer.candidateCount += 1;
     // A candidate can be emitted during setLocalDescription, before SDP is sent.
@@ -223,7 +223,7 @@ async function createPeer(id, name, initiator) {
       peer.reason = `连接状态：${pc.connectionState}`;
       if (state.active?.peerId === id) failActive('设备连接中断');
     } else if (pc.connectionState === 'connected' && !peer.ready) {
-      peer.reason = '正在验证局域网路径';
+      peer.reason = '正在检查 P2P 连接';
     }
     renderPeers();
   };

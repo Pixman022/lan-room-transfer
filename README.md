@@ -1,4 +1,4 @@
-# LAN Room — LAN browser file transfer (research POC)
+# LAN Room — browser P2P file sharing (research POC)
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Pixman022/lan-room-transfer)
 
@@ -31,10 +31,10 @@ The Render Free web-service plan may sleep during inactivity and wake with a del
 - Initial 4-digit suggestion comes from currently unoccupied codes; **suggestions are not reserved** until entry. Room membership remains open while the room is live; custom codes are reusable but not permanently reserved
 - 2-minute idle expiry after everyone disconnects, with session-token-based recovery
 - WebSocket offer/answer/ICE signalling only. File metadata and bytes never intentionally pass through the signal server
-- Browser WebRTC DataChannel (`iceServers: []`); conservative candidate-pair check before allowing file transfers
+- Browser WebRTC DataChannel (`iceServers: []`); restricted P2P checks require a selected `host`/`host` ICE pair, allow browser-hidden/mDNS addresses, and still reject confirmed relay/reflexive pairs, known public/unsupported addresses and mismatched visible private subnets. **No absolute LAN-only guarantee.**
 - Friendly default **English Color + Animal** name (for example `Amber Bear` or `Coral Fox`) on first visit, saved in the browser; editable on the home page or inside a room. Old automatically generated Chinese `label-1234` defaults are migrated, while user-chosen names are preserved. Name updates propagate without changing device identity. A browser refresh can restore the room using the existing single entry action
 - **Warm pale-orange visual design**, white cards on a soft peach background, short labels and playful animal avatars (inspired by the visual reference supplied for this separate project)
-- Room-wide ephemeral file shelf: **drop or choose files immediately after entering**—no recipient selection. All verified connected peers see shared file names and sizes, and later joiners receive the uploader's current catalog. Peers decide independently whether to **Receive** or **Receive All**. File bytes transfer only on explicit receipt over verified local WebRTC channels. The uploader can withdraw a shared file. No file bytes or metadata are intentionally stored by the public signalling server. Shared files disappear from the room when the uploading device leaves or disconnects.
+- Room-wide ephemeral file shelf: **drop or choose files immediately after entering**—no recipient selection. All verified connected peers see shared file names and sizes, and later joiners receive the uploader's current catalog. Peers decide independently whether to **Receive** or **Receive All**. File bytes transfer only on explicit receipt over accepted direct P2P WebRTC channels. The uploader can withdraw a shared file. No file bytes or metadata are intentionally stored by the public signalling server. Shared files disappear from the room when the uploading device leaves or disconnects.
 - Global one-file-at-a-time receiver queue, cancellation/retry controls and progress
 - Browser download link after receiving a file; each file is limited to **32 MiB** in this POC
 - Desktop/mobile responsive UI draft
@@ -48,7 +48,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Open **http://127.0.0.1:8765** in a browser. The page suggests a random device name and 4-digit room code; optionally edit either, then click **进入房间**. The first user with that code creates the live room; every later user with that code enters it automatically. This checks the interface and WebSocket signalling on one computer. **Two tabs of the same computer are deliberately denied file transfer** because the LAN route policy rejects same-address/loopback connections. This is expected.
+Open **http://127.0.0.1:8765** in a browser. The page suggests a random device name and 4-digit room code; optionally edit either, then click **进入房间**. The first user with that code creates the live room; every later user with that code enters it automatically. This checks the interface and WebSocket signalling on one computer. Two tabs of the same computer with identical visible candidate addresses are rejected; if a browser hides those addresses, the restricted host-only heuristic cannot reliably distinguish such tabs. This test is not a substitute for two physical devices.
 
 For actual two-device testing, deploy the app + signalling server behind a **trusted HTTPS origin with WebSocket (`wss://`) support**, then open the same public URL on two different devices connected to a LAN. No local server is needed for those users. Ensure `PUBLIC_ORIGIN` exactly equals the public `https://...` origin. A static GitHub Pages site alone cannot host this WebSocket signalling server.
 
@@ -65,7 +65,7 @@ The optional `tests/browser_smoke.py` requires Playwright/Chromium and a locally
 
 ## What is NOT proven / NOT production-ready
 
-1. A browser cannot cryptographically or authoritatively prove the OS's actual route is local. The current check only accepts `host` ICE candidate pairs with **two distinct, readable RFC1918 IPv4 addresses in the same /24**. This intentionally rejects IPv6, mDNS/hidden IPs, same-device loopback, many VPNs, and some legitimate LANs. A VPN or unusual routing setup can still falsely appear to satisfy the rule. **It does not meet an absolute LAN-only security guarantee.**
+1. **Restricted P2P mode (approved 2026-11-18):** accept an explicitly selected `host`/`host` ICE candidate pair when browser privacy hides one or both addresses; reject `relay`/`srflx`, visible public/unsupported addresses, known mismatched private IPv4 /24 networks, and identical readable endpoints. The app has no configured STUN/TURN and does not relay file bytes or file metadata through its cloud signalling service. **This does not prove that the network route remains on one physical LAN.** VPN or unusual routing may still carry P2P traffic outside it.
 2. No real two-physical-device LAN transfer test was run yet. Network outcomes cannot be inferred from unit tests.
 3. Receiving files currently buffers up to 32 MiB in the browser and provides a manual **Save** link upon arrival. Automatic default download and optional File System Access directory/file picker have **not** been implemented yet.
 4. The UI has no QR joining, peer blocklist, automatic content security scanning, or persisted transfer history yet.
@@ -82,7 +82,7 @@ public/device-name.js      device name generation and storage
 public/room-code.js        initial room-code suggestion and input validation
 public/styles.css          responsive styles
 public/app.js              WebRTC and file-list/queue prototype
-public/route-policy.js     fail-closed candidate pair heuristic
+public/route-policy.js     restricted host-only P2P candidate-pair policy
 requirements.txt
 Dockerfile                 container packaging for HTTPS reverse-proxied deployment
 package.json               JS unit test configuration (no npm install required)
@@ -100,7 +100,7 @@ docs/test-matrix.md        manual field test plan
 ## Product decisions reflected in this code
 
 - Web UI; no client app installation; no server deployment required **for end users**.
-- Internet for HTTPS page/signalling only; content is intended to transfer via direct LAN WebRTC.
+- Internet for HTTPS page/signalling; file contents transfer through accepted direct WebRTC peer connections, with no cloud relay or storage. A physical LAN-only route is not guaranteed.
 - Everyone with the room code can join without approval; no owner/admin.
 - One entry action automatically creates a missing room or enters an existing one. Room code suggestions are not reserved, so concurrent users could claim a suggested code before it is submitted.
 - Custom code can be reused after room expires, with no permanent ownership.

@@ -1,25 +1,24 @@
 # Technical risks and gaps (2026-11-18)
 
-## P0 — Strong LAN-only assertion remains unverified
+## P0 — Restricted P2P mode (approved, 2026-11-18)
 
-`RTCPeerConnection` can establish a direct peer connection without a TURN relay, but P2P does not imply physical LAN. Two peers on a VPN or using globally routable IPv6 can appear to be directly connected even though traffic may traverse a public network. Browsers can mask host addresses using mDNS; sometimes candidate stats do not reveal enough information for a conservative check.
+Real-device diagnostics confirmed an established WebRTC connection (`connection=connected`, `ice=connected`, `channel=open`) while the browser masked candidate addresses. The former strict private-IPv4 /24 rule incorrectly blocked this usable connection. The user explicitly approved **restricted B** on 2026-11-18.
 
-Current fail-closed test strategy: `iceServers=[]`, transmit only host candidates, inspect the selected ICE candidate pair using `getStats()`, require both readable IPv4 RFC1918 host candidates in the same /24 and reject same-IP candidates. Recheck periodically during transfer. This is intentionally narrower than "same local network" and is not an authoritative routing proof. The prototype must not be advertised as guaranteeing LAN-only transmission.
+Current rule: `RTCPeerConnection({iceServers: []})`, transmit only `host` ICE candidates in signalling, require an explicitly selected `host`/`host` pair in `getStats()`, then:
+- Allow private IPv4 peers if two readable endpoints are different and in the same /24.
+- Allow a selected host pair when one/both addresses are mDNS-obfuscated, absent or redacted.
+- Reject any selected `relay`/`srflx` pair, visible public/unsupported addresses, visible IPv6, distinct visible private /24 subnets, identical readable endpoints, and missing selected-pair/type statistics.
+- Recheck the selected candidate pair periodically while sending file chunks. No TURN and no file data via the public signalling server.
 
-**Decision gate**: If field testing confirms browser-only route information is insufficient for a hard LAN-only guarantee, choose one of the following explicitly before production:
-1. Redefine the promise to "direct P2P, no content upload to our server" (this is a **product requirement change**, requiring user approval), or
-2. Use an additional trusted network-local component or a platform API where applicable (this changes the zero-install/zero-deploy promise and requires product approval), or
-3. Keep strict fail-closed behavior and accept limited browser/network support, provided false-positive network-routing risks are evaluated.
+**This is not an authoritative LAN-only policy.** Host-only P2P can still traverse a VPN or routed network, including paths outside the physical LAN. Absence of an application-configured STUN/TURN server doesn't prove the network route; browser-hidden addresses prevent reliable classification. This is a deliberate compatibility/security trade-off rather than a verified LAN guarantee.
 
-## P0 — Real-device connection succeeds; browser address privacy prevents strict path verification
+Also, a room code is not authorization: room participants can view file metadata and initiate receiving any shared file. A four-digit code is easy to guess. Use non-sensitive test files until membership protection and real-device testing are completed.
 
-Two separate devices reported \`connection=connected\`, \`ice=connected\`, \`channel=open\`, and zero signalling errors, yet \`routeVerified=false\`. The blocker is the application's /24 private-IPv4 selected-pair gate, not a failed WebRTC handshake. Browser WebRTC statistics are permitted to redact remote candidate IP addresses, and mDNS ICE candidate names intentionally hide the underlying LAN address. Connected/no-TURN/host-only ICE is not proof of a physical LAN route: a VPN can produce similar candidate types. Do not bypass this gate without an explicit product decision.
+## P0 — Real-device connection reliability
 
-The app now diagnoses \`mdns-obfuscated\`, \`address-hidden\`, \`ipv6-unsupported\`, \`subnet-mismatch\`, \`non-host\`, and unavailable candidate stats, exposing only coarse address categories and no raw address in copied diagnostics. This improves observability, **not** connectivity.
+Two-device connection and file-channel establishment have been observed in user diagnostics; file bytes have **not** yet been confirmed end-to-end. Browser-side candidate stats are diagnostic hints, not proof of a physical LAN path. Test two separate physical devices with a new room, validate file download and hashes, then test a VPN and two separate networks to measure connectivity and disclosure. Do not report strict LAN isolation as passed.
 
-**Product choice before permitting files on masked-address browsers:** retain conservative fail-closed checks with limited compatibility, or explicitly accept that browser-only zero-install P2P without a relay cannot guarantee the connection physically stays on the same LAN. Allowing host-only connections with hidden addresses would be a change to the earlier strict LAN-only promise, not a bug fix. A trusted local component/network API would be another scope change.
-
-Standards references: https://www.w3.org/TR/webrtc-stats/ and https://rtcweb-wg.github.io/mdns-ice-candidates/mmusic/draft-ietf-mmusic-mdns-ice-candidates.html
+Official references: https://www.w3.org/TR/webrtc-stats/ and https://rtcweb-wg.github.io/mdns-ice-candidates/mmusic/draft-ietf-mmusic-mdns-ice-candidates.html
 
 ## P0 — Global room code and guessed IDs
 
