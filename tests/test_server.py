@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from aiohttp.test_utils import AioHTTPTestCase
 
@@ -134,6 +135,43 @@ class SignallingTests(AioHTTPTestCase):
         await b.close()
         self.assertEqual((await a.receive_json())["type"], "peer-offline")
         await a.close()
+
+    async def test_peer_online_precedes_welcome_and_immediate_first_offer(self):
+        # The joining browser immediately offers after welcome. Ensure that an
+        # already-present browser has received its peer-online notification
+        # before the server can forward that offer on the same WebSocket.
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        phone = await self.client.ws_connect("/ws", headers=origin)
+        await phone.send_json({"type": "enter", "code": "FIRSTOFFER", "name": "Phone"})
+        phone_welcome = await phone.receive_json()
+
+        calls = []
+        async def recorded_send(ws, payload):
+            if payload.get("type") in ("peer-online", "welcome"):
+                calls.append(payload["type"])
+            return await send(ws, payload)
+
+        pc = await self.client.ws_connect("/ws", headers=origin)
+        with patch("server.send", new=recorded_send):
+            await pc.send_json({"type": "enter", "code": "FIRSTOFFER", "name": "PC"})
+            pc_welcome = await pc.receive_json()
+            await pc.send_json({
+                "type": "signal", "to": phone_welcome["id"],
+                "toGeneration": phone_welcome["generation"],
+                "signal": {"type": "offer", "attempt": 1, "sdp": "first-offer"},
+            })
+            presence = await phone.receive_json()
+            offer = await phone.receive_json()
+
+        self.assertEqual(calls, ["peer-online", "welcome"])
+        self.assertEqual(presence["type"], "peer-online")
+        self.assertEqual(presence["id"], pc_welcome["id"])
+        self.assertEqual(presence["generation"], pc_welcome["generation"])
+        self.assertEqual(offer["type"], "signal")
+        self.assertEqual(offer["from"], pc_welcome["id"])
+        self.assertEqual(offer["signal"]["sdp"], "first-offer")
+        await pc.close()
+        await phone.close()
 
     async def test_rapid_refresh_replaces_socket_and_rejects_stale_generation(self):
         origin = {"Origin": str(self.server.make_url("/"))[:-1]}
