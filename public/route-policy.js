@@ -20,22 +20,54 @@ export function isRFC1918(a) {
   return a && (a[0] === 10 || (a[0] === 172 && a[1] >= 16 && a[1] <= 31) || (a[0] === 192 && a[1] === 168));
 }
 
+// Diagnostics report categories, never hostnames or IP addresses.
+export function candidateAddressKind(candidate) {
+  if (!candidate) return 'unavailable';
+  const address = candidate.address ?? candidate.ip;
+  if (typeof address !== 'string' || !address) return 'hidden';
+  if (address === '0.0.0.0' || address === '::') return 'redacted';
+  if (address.toLowerCase().endsWith('.local')) return 'mdns';
+  const ipv4 = parseIPv4(address);
+  if (ipv4) return isRFC1918(ipv4) ? 'private-ipv4' : 'other-ipv4';
+  if (address.includes(':')) return 'ipv6';
+  return 'hostname';
+}
+function result(allowed, code, reason, local, remote) {
+  return {
+    allowed, code, reason,
+    localAddressKind: candidateAddressKind(local),
+    remoteAddressKind: candidateAddressKind(remote),
+    localCandidateType: local?.candidateType ?? 'unavailable',
+    remoteCandidateType: remote?.candidateType ?? 'unavailable',
+  };
+}
+
 export function assessPair(local, remote) {
-  if (!local || !remote || local.candidateType !== 'host' || remote.candidateType !== 'host') {
-    return { allowed: false, reason: '实际连接不是已确认的双端 host 直连' };
+  if (!local || !remote)
+    return result(false, 'stats-unavailable', '浏览器没有提供完整的候选统计信息，无法验证局域网路径', local, remote);
+  if (local.candidateType !== 'host' || remote.candidateType !== 'host')
+    return result(false, 'non-host', '实际连接不是已确认的双端 host 直连', local, remote);
+
+  const localKind = candidateAddressKind(local);
+  const remoteKind = candidateAddressKind(remote);
+  if (localKind !== 'private-ipv4' || remoteKind !== 'private-ipv4') {
+    const kinds = [localKind, remoteKind];
+    if (kinds.includes('mdns'))
+      return result(false, 'mdns-obfuscated', '浏览器使用 mDNS 隐藏了候选地址，无法验证双方是否在同一网段', local, remote);
+    if (kinds.some(k => k === 'hidden' || k === 'redacted'))
+      return result(false, 'address-hidden', '浏览器隐藏了候选 IP 地址，无法验证双方是否在同一网段', local, remote);
+    if (kinds.includes('ipv6'))
+      return result(false, 'ipv6-unsupported', '连接使用了 IPv6 地址，当前只验证私有 IPv4 网段', local, remote);
+    return result(false, 'unsupported-address', '连接候选不是受支持的私有 IPv4 地址，无法验证局域网路径', local, remote);
   }
   const a = parseIPv4(local.address ?? local.ip);
   const b = parseIPv4(remote.address ?? remote.ip);
-  if (!isRFC1918(a) || !isRFC1918(b)) {
-    return { allowed: false, reason: '浏览器未提供可核实的私有 IPv4 地址，或使用了不受支持的网络' };
-  }
-  if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2]) {
-    return { allowed: false, reason: '连接两端不在相同的私有 IPv4 /24 网段' };
-  }
-  if (a.every((value, index) => value === b[index])) {
-    return { allowed: false, reason: '两端地址相同，原型不验证同一设备的标签页传输' };
-  }
-  return { allowed: true, reason: '候选地址满足保守 /24 检查（不代表已证明物理 LAN 路由）' };
+  if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2])
+    return result(false, 'subnet-mismatch', '连接两端不在相同的私有 IPv4 /24 网段', local, remote);
+  if (a.every((v, i) => v === b[i]))
+    return result(false, 'same-address', '两端地址相同，原型不验证同一设备的标签页传输', local, remote);
+  return result(true, 'private-ipv4-host-pair',
+    '候选地址满足保守 /24 检查（不代表已证明物理 LAN 路由）', local, remote);
 }
 
 export async function inspectSelectedPath(pc) {
@@ -50,7 +82,7 @@ export async function inspectSelectedPath(pc) {
   }
   if (!pair) pair = entries.find(s => s.type === 'candidate-pair' && s.selected === true && s.state === 'succeeded');
   if (!pair || !pair.localCandidateId || !pair.remoteCandidateId) {
-    return { allowed: false, reason: '浏览器尚未公开已选择的 ICE 候选连接对' };
+    return { ...assessPair(null, null), code: 'pair-unavailable', reason: '浏览器尚未公开已选择的 ICE 候选连接对' };
   }
   return assessPair(report.get(pair.localCandidateId), report.get(pair.remoteCandidateId));
 }
