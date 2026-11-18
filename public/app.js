@@ -96,6 +96,15 @@ function remembered() {
   try { return JSON.parse(sessionStorage.getItem('lan-room-session') || 'null'); }
   catch { return null; }
 }
+// WebSocket preserves message arrival order; await each SDP/ICE operation in that order.
+// Async event listeners without a queue race setRemoteDescription and ICE candidates.
+function orderedMessageHandler(handler, reportError) {
+  let pending = Promise.resolve();
+  return message => {
+    pending = pending.then(() => handler(message)).catch(reportError);
+    return pending;
+  };
+}
 function connect(action) {
   if (state.ws && state.ws.readyState < WebSocket.CLOSING) return;
   feedback('正在连接协调服务…');
@@ -104,17 +113,23 @@ function connect(action) {
   const ws = new WebSocket(`${scheme}://${location.host}/ws`);
   state.ws = ws;
   ws.addEventListener('open', () => ws.send(JSON.stringify(action)));
-  ws.addEventListener('message', async event => {
+  const processMessage = orderedMessageHandler(
+    msg => state.ws === ws ? handleServer(msg) : undefined,
+    err => feedback(`连接处理失败：${err.message}`, true),
+  );
+  ws.addEventListener('message', event => {
     let msg;
     try { msg = JSON.parse(event.data); }
     catch { return; }
-    try { await handleServer(msg); }
-    catch (err) { feedback(`连接处理失败：${err.message}`, true); }
+    void processMessage(msg);
   });
   ws.addEventListener('close', () => {
     if (state.ws !== ws) return;
     state.ws = null;
-    for (const peer of state.peers.values()) peer.pc.close();
+    for (const peer of state.peers.values()) {
+      clearTimeout(peer.connectTimer);
+      peer.pc.close();
+    }
     state.peers.clear();
     failActive('信令连接断开');
     showRoom(false);
@@ -148,7 +163,7 @@ async function handleServer(msg) {
       renderPeers(); break;
     case 'peer-offline': {
       const peer = state.peers.get(msg.id);
-      if (peer) { peer.pc.close(); state.peers.delete(msg.id); }
+      if (peer) { clearTimeout(peer.connectTimer); peer.pc.close(); state.peers.delete(msg.id); }
       if (state.active?.peerId === msg.id) failActive('发送设备已离线');
       discardPeerOffers(msg.id);
       renderPeers(); renderRequests(); renderJobs(); break;
@@ -168,13 +183,31 @@ async function createPeer(id, name, initiator) {
   if (state.peers.has(id)) return state.peers.get(id);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, pc, channel: null, verified: false, remoteReady: false,
-    ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set() };
+    ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(),
+    stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
+    localCandidates: [], candidateCount: 0, startedAt: Date.now(), connectTimer: null };
   state.peers.set(id, peer);
+  // Do not leave the UI stuck in an indefinite 'connecting' state.
+  // The PC is not closed: a late successful connection may still recover.
+  peer.connectTimer = setTimeout(() => {
+    if (state.peers.get(id) !== peer || peer.ready || pc.connectionState === 'closed') return;
+    if (peer.channel?.readyState !== 'open' &&
+        (peer.reason === '正在建立连接' || peer.reason === '正在验证局域网路径')) {
+      peer.reason = '连接超时：请检查 Wi-Fi、VPN 或访客网络隔离';
+      renderPeers();
+    }
+  }, 12000);
   pc.onicecandidate = event => {
     if (!event.candidate) return;
     const candidate = event.candidate.toJSON();
-    // Host candidates only: no STUN, no TURN and no server-relayed file bytes.
-    if (/\btyp host\b/.test(candidate.candidate)) sendSignal(id, { type: 'candidate', candidate });
+    // Only private-path host candidates and ICE end-of-candidates signaling.
+    // No STUN/TURN, and the file-byte path gate is unchanged.
+    if (candidate.candidate !== '' && !/\btyp host\b/.test(candidate.candidate)) return;
+    if (candidate.candidate !== '') peer.candidateCount += 1;
+    // A candidate can be emitted during setLocalDescription, before SDP is sent.
+    // Buffer locally until offer/answer has been delivered in signaling order.
+    if (peer.localSdpSent) sendSignal(id, { type: 'candidate', candidate });
+    else peer.localCandidates.push(candidate);
   };
   pc.onconnectionstatechange = () => {
     if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
@@ -186,30 +219,48 @@ async function createPeer(id, name, initiator) {
     }
     renderPeers();
   };
-  pc.oniceconnectionstatechange = () => renderDiagnostics();
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === 'failed') {
+      peer.ready = false;
+      peer.reason = '\u0049\u0043\u0045 \u68c0\u67e5\u5931\u8d25\uff1a\u8bf7\u68c0\u67e5\u662f\u5426\u5728\u540c\u4e00 Wi-Fi\u3001\u8bbf\u5ba2\u9694\u79bb\u6216 VPN';
+    }
+    renderPeers();
+  };
   pc.ondatachannel = event => attachChannel(peer, event.channel);
   if (initiator) {
     attachChannel(peer, pc.createDataChannel('room-files', { ordered: true }));
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    sendSignal(id, { type: 'offer', sdp: pc.localDescription.sdp });
+    sendLocalDescription(peer, 'offer');
   }
   return peer;
 }
 
+function sendLocalDescription(peer, type) {
+  sendSignal(peer.id, { type, sdp: peer.pc.localDescription.sdp });
+  peer.stage = `${type}-sent`;
+  peer.localSdpSent = true;
+  for (const candidate of peer.localCandidates.splice(0)) {
+    sendSignal(peer.id, { type: 'candidate', candidate });
+  }
+}
 async function handleSignal(id, signal) {
   if (!signal || !['offer', 'answer', 'candidate'].includes(signal.type)) return;
   const peer = state.peers.get(id) || await createPeer(id, '其他设备', false);
   if (signal.type === 'offer') {
+    peer.stage = 'offer-received';
     await peer.pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
     await flushCandidates(peer);
     const answer = await peer.pc.createAnswer();
     await peer.pc.setLocalDescription(answer);
-    sendSignal(id, { type: 'answer', sdp: peer.pc.localDescription.sdp });
+    sendLocalDescription(peer, 'answer');
   } else if (signal.type === 'answer') {
+    peer.stage = 'answer-received';
     await peer.pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
     await flushCandidates(peer);
-  } else if (signal.candidate?.candidate?.includes(' typ host ')) {
+  } else if (signal.candidate && typeof signal.candidate.candidate === 'string' &&
+             (signal.candidate.candidate === '' || signal.candidate.candidate.includes(' typ host '))) {
+    if (signal.candidate.candidate !== '') peer.remoteCandidateCount = (peer.remoteCandidateCount || 0) + 1;
     if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(signal.candidate);
     else peer.candidates.push(signal.candidate);
   }
@@ -235,6 +286,7 @@ function attachChannel(peer, channel) {
         peer.verified = true;
         channel.send(JSON.stringify({ kind: 'ready' }));
         peer.ready = peer.remoteReady;
+        if (peer.ready) clearTimeout(peer.connectTimer);
         syncSharedOffers(peer);
         renderPeers();
         return;
@@ -259,6 +311,7 @@ async function receiveChannel(peer, data) {
   if (msg.kind === 'ready') {
     peer.remoteReady = true;
     peer.ready = peer.verified;
+    if (peer.ready) clearTimeout(peer.connectTimer);
     syncSharedOffers(peer);
     renderPeers();
     return;
@@ -498,6 +551,10 @@ function diagnosticsSnapshot() {
       channel: peer.channel?.readyState ?? 'none',
       routeVerified: Boolean(peer.verified),
       peerVerified: Boolean(peer.remoteReady),
+      stage: peer.stage || 'unknown',
+      elapsedSeconds: Math.floor((Date.now() - (peer.startedAt || Date.now())) / 1000),
+      candidatesSent: peer.candidateCount || 0,
+      candidatesReceived: peer.remoteCandidateCount || 0,
       canTransfer: Boolean(peer.ready),
       // Do not copy room codes, member names, IP addresses or file names.
       reason: String(peer.reason ?? '').replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]').slice(0, 180),
@@ -515,7 +572,7 @@ function renderDiagnostics() {
   for (const peer of data.peers) {
     const line = elem('p', 'diagnostic-line');
     line.append(elem('strong', '', `设备 ${peer.device}  `));
-    line.append(document.createTextNode(`${peer.connection} / ${peer.ice} / ${peer.channel} · ${peer.reason || '等待连接'}`));
+    line.append(document.createTextNode(`${peer.connection} / ${peer.ice} / ${peer.channel} · ${peer.stage} · ${peer.reason || '等待连接'}`));
     root.append(line);
   }
 }
@@ -671,7 +728,8 @@ $('leave-room').onclick = () => {
   state.jobs = []; state.queue = []; state.active = null; state.offers.clear(); state.outbound.clear();
   state.ownOffers = [];
   state.ws?.close(); state.ws = null;
-  for (const peer of state.peers.values()) peer.pc.close(); state.peers.clear();
+  for (const peer of state.peers.values()) { clearTimeout(peer.connectTimer); peer.pc.close(); }
+  state.peers.clear();
   state.code = '';
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };

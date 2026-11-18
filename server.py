@@ -239,8 +239,9 @@ async def ws_handler(request):
                     if set(candidate) - {"candidate", "sdpMid", "sdpMLineIndex", "usernameFragment"}:
                         raise ValueError("ICE 候选信息包含多余字段")
                     raw = candidate.get("candidate")
-                    if not isinstance(raw, str) or len(raw) > 4096 or not raw.startswith("candidate:") or " typ host " not in raw:
-                        raise ValueError("仅允许 host ICE 候选")
+                    if (not isinstance(raw, str) or len(raw) > 4096 or
+                            (raw != "" and (not raw.startswith("candidate:") or " typ host " not in raw))):
+                        raise ValueError("仅允许 host ICE 候选或候选收集结束标记")
                     if candidate.get("sdpMid") is not None and (not isinstance(candidate["sdpMid"], str) or len(candidate["sdpMid"]) > 64):
                         raise ValueError("sdpMid 无效")
                     if candidate.get("sdpMLineIndex") is not None and (type(candidate["sdpMLineIndex"]) is not int or not 0 <= candidate["sdpMLineIndex"] <= 64):
