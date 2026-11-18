@@ -4,7 +4,7 @@ import re
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-modules = ['device-name.js', 'room-code.js', 'route-policy.js']
+modules = ['device-name.js', 'room-code.js', 'route-policy.js', 'checksum.js']
 code = '\n'.join(re.sub(r'\bexport (?=(?:const|function|async function)\b)', '', (ROOT / 'public' / module).read_text())
                  for module in modules)
 app = '\n'.join(line for line in (ROOT / 'public/app.js').read_text().splitlines()

@@ -1,4 +1,5 @@
 import { inspectSelectedPath, isHostCandidateLine } from './route-policy.js';
+import { sha256Hex, isSha256Hex, verifySha256 } from './checksum.js';
 import { DEVICE_NAME_KEY, deviceAvatar, generateDeviceName, getOrCreateDeviceName } from './device-name.js';
 import { generateRandomRoomCode, normalizeRoomCode } from './room-code.js';
 
@@ -6,6 +7,7 @@ import { generateRandomRoomCode, normalizeRoomCode } from './room-code.js';
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
 const MAX_FILES = 20;
+const TRANSFER_IDLE_MS = 30000;
 const $ = id => document.getElementById(id);
 const state = {
   ws: null, code: '', id: '', token: '', leaving: false, peers: new Map(),
@@ -353,15 +355,29 @@ async function receiveChannel(peer, data) {
   } else if (msg.kind === 'file-start') {
     const job = state.active;
     if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId || job.offerId !== msg.offerId || msg.size !== job.size) return;
-    job.status = '传输中'; job.received = 0; job.chunks = []; renderJobs();
+    job.status = '传输中'; job.received = 0; job.chunks = [];
+    armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时'); renderJobs();
   } else if (msg.kind === 'file-end') {
     const job = state.active;
-    if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId) return;
+    if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId ||
+        job.offerId !== msg.offerId || job.status !== '传输中') return;
     if (job.cancelled) { finishJob('已取消'); return; }
     if (job.received !== job.size) { failActive('文件大小不匹配'); return; }
-    const url = URL.createObjectURL(new Blob(job.chunks));
-    job.url = url; job.chunks = [];
-    finishJob('已传输，点击保存');
+    if (!isSha256Hex(msg.sha256)) { failActive('发送端缺少有效校验值，请双方刷新后重试'); return; }
+    job.status = '校验中';
+    armJobTimer(job, TRANSFER_IDLE_MS, '文件校验超时');
+    renderJobs();
+    try {
+      const blob = new Blob(job.chunks);
+      const verified = await verifySha256(blob, msg.sha256);
+      if (state.active !== job || job.cancelled) return;
+      if (!verified) { failActive('文件 SHA-256 校验失败，已丢弃数据'); return; }
+      job.url = URL.createObjectURL(blob);
+      job.chunks = [];
+      finishJob('校验通过，点击保存');
+    } catch (err) {
+      if (state.active === job) failActive(`文件校验失败：${err.message}`);
+    }
   } else if (msg.kind === 'file-canceled') {
     if (state.active?.peerId === peer.id && state.active?.fileId === msg.fileId) finishJob('已取消');
   } else if (msg.kind === 'file-error') {
@@ -374,6 +390,7 @@ function handleBinary(peer, data) {
   if (data.byteLength > CHUNK_SIZE || job.received + data.byteLength > job.size) { failActive('数据块超过允许大小'); return; }
   if (!job.cancelled) job.chunks.push(data);
   job.received += data.byteLength;
+  armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时');
   renderJobs();
 }
 
@@ -404,7 +421,14 @@ async function startSendingFile(peer, request) {
       }
       if (!token.cancelled) peer.channel.send(chunk);
     }
-    sendPeer(peer, { kind: token.cancelled ? 'file-canceled' : 'file-end', fileId: request.fileId });
+    if (token.cancelled) {
+      sendPeer(peer, { kind: 'file-canceled', fileId: request.fileId });
+    } else {
+      // The digest stays on the P2P channel; never sent to the public signalling server.
+      const sha256 = await sha256Hex(file);
+      if (token.cancelled) sendPeer(peer, { kind: 'file-canceled', fileId: request.fileId });
+      else sendPeer(peer, { kind: 'file-end', offerId: request.offerId, fileId: request.fileId, sha256 });
+    }
   } catch (err) {
     sendPeer(peer, { kind: 'file-error', fileId: request.fileId, message: String(err.message).slice(0, 160) });
   } finally {
@@ -430,9 +454,18 @@ function startNext() {
   }
   state.active = job;
   job.status = '等待发送端';
-  job.timer = setTimeout(() => { if (state.active === job) failActive('等待发送端超时'); }, 20000);
-  sendPeer(peer, { kind: 'request-file', offerId: job.offerId, fileId: job.fileId });
+  armJobTimer(job, 20000, '等待发送端超时');
+  if (!sendPeer(peer, { kind: 'request-file', offerId: job.offerId, fileId: job.fileId })) {
+    failActive('文件请求发送失败');
+    return;
+  }
   renderJobs();
+}
+function armJobTimer(job, delay, reason) {
+  if (job.timer) clearTimeout(job.timer);
+  job.timer = setTimeout(() => {
+    if (state.active === job) failActive(reason);
+  }, delay);
 }
 function finishJob(status) {
   const job = state.active;
@@ -441,7 +474,7 @@ function finishJob(status) {
   job.status = status;
   const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
   const file = offer?.files.find(f => f.id === job.fileId);
-  if (file) file.status = status === '已传输，点击保存' ? 'complete' : 'failed';
+  if (file) file.status = status === '校验通过，点击保存' ? 'complete' : 'failed';
   job.chunks = [];
   state.active = null;
   renderRequests(); renderJobs();

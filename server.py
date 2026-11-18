@@ -273,7 +273,7 @@ async def suggest_code(request):
 
 async def assets(request):
     path = request.match_info["filename"]
-    if path not in {"app.js", "styles.css", "route-policy.js", "device-name.js", "room-code.js"}:
+    if path not in {"app.js", "styles.css", "route-policy.js", "device-name.js", "room-code.js", "checksum.js"}:
         raise web.HTTPNotFound()
     return web.FileResponse(ROOT / "public" / path)
 

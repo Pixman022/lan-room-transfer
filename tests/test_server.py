@@ -164,6 +164,11 @@ class SignallingTests(AioHTTPTestCase):
         await a.close()
         await b.close()
 
+    async def test_checksum_module_is_served(self):
+        response = await self.client.get("/static/checksum.js")
+        self.assertEqual(response.status, 200)
+        self.assertIn("verifySha256", await response.text())
+
     async def test_device_name_module_is_served(self):
         response = await self.client.get("/static/device-name.js")
         self.assertEqual(response.status, 200)
