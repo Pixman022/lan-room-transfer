@@ -2,6 +2,8 @@
 
 Status: **partial manual check only** on actual devices. The reported results confirm that Device A could enter a room and Device B could enter using the same code; they do **not** confirm file selection, peer WebRTC connectivity, file catalog visibility, or file bytes transferred. Tests marked "未通过/未测试" were not separated into definite failures vs not-run.
 
+**Connection stability follow-up (2026-11-18):** User reported that establishing a peer connection sometimes takes unusually long and behaves inconsistently. This is an observation, not yet a measured failure rate. Code fixes now serialize incoming SDP/ICE operations, send local SDP before buffered candidates, forward ICE end-of-candidates, and show an explicit status after 12 seconds while permitting late recovery. Do not equate this to verified performance improvement until separate devices repeat the test. For each retry, record `stage`, `elapsedSeconds`, `candidatesSent`, `candidatesReceived`, `ice`, `channel`, and `reason` from the privacy-reduced diagnostics on both devices. Browser automation here could only test mocked peer sequencing, not a genuine routed LAN path.
+
 To collect follow-up evidence, open **诊断** next to the online device count and use **复制诊断** separately on each device. The copied report excludes room code, member names, file names, and network IP addresses. Record whether the status says 房间已连接, 直连未就绪 or 文件直连就绪; also record whether the uploader's file shows 等待设备直连 or 可供 N 台设备接收. Do not infer that "房间已连接" means the file path is ready. The conservative route policy remains active.
 
 | Case | Setup | Expected outcome | Status |
