@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { isHostCandidateLine } from '../public/route-policy.js';
 
 const appSource = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
   .split('\n').filter(line => !line.startsWith('import ')).join('\n');
@@ -90,6 +91,7 @@ function harness() {
     location: { protocol: 'https:', host: 'test.example' },
     WebSocket: FakeWebSocket,
     RTCPeerConnection: FakeRTCPeerConnection,
+    isHostCandidateLine,
     setTimeout: (cb, ms) => { const id = ++nextTimer; timers.set(id, {cb, ms}); return id; },
     clearTimeout: id => timers.delete(id),
     queueMicrotask,
