@@ -40,6 +40,12 @@ Receiving files currently buffers a maximum of 32 MiB; SHA-256 calculation also 
 
 The current receiver buffers the entire file (up to 32 MiB) before offering a browser download link. Long files/large transfers need streaming output with user-selected file handles where supported, or a robust fallback with explicit browser limitations. Do not claim a 1 GB mobile file is supported without live tests. A browser does not reliably continue transmitting when mobile OS backgrounds the tab.
 
+## P1 — Rapid refresh and obsolete signaling (2026-11-18)
+
+A client reported `目标设备已离线` while its local RTC object was still `answer-sent / ice:new`. The old implementation created a duplicate room member when a valid session token re-entered before the previous WebSocket had fully closed. An unexpected delayed offer could also recreate a peer that the room already marked offline.
+
+The revised implementation supports authenticated WebSocket takeover, uses a new generation identifier for each peer session, rejects signaling addressed to an obsolete generation, ignores unknown/late peer signals, and prevents a replaced old socket from sending a false offline notice. Server integration and protocol tests pass; stable behavior across repeated real-world network changes is not yet proven. Both browsers should reload after deployment to use the generation-aware protocol.
+
 ## P1 — Scope still pending
 
 - QR invite / mobile scan flow
