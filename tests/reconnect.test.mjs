@@ -158,3 +158,19 @@ test('invalid initial room entry fails without reconnecting', async () => {
   assert.equal(t.timers.size,0);
   assert.equal(t.state.code,'');
 });
+
+test('temporary room-entry rejection during recovery continues backoff', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const first=t.FakeWebSocket.sockets[0];
+  await join(t,first);
+  first.close();
+  fireNextTimer(t);
+  const retry=t.FakeWebSocket.sockets[1];
+  retry.open();
+  await t.run('handleServer({type:"error",message:"请求过于频繁，请稍后重试"})');
+  assert.equal(retry.readyState,t.FakeWebSocket.CLOSED);
+  assert.equal(t.state.code,'5832');
+  assert.equal(t.timers.size,1);
+  assert.equal([...t.timers.values()][0].ms,2000);
+});
