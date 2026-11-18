@@ -13,7 +13,49 @@ const RECONNECT_MAX_DELAY_MS = 15000;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 const TRANSFER_IDLE_MS = 30000;
+const FULL_DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search || '');
+const debugStartedAt = Date.now();
 const $ = id => document.getElementById(id);
+
+// Debug is deliberately explicit: logs contain room codes, credentials,
+// unredacted SDP/ICE candidates, browser-visible IPs and file names.
+// Data stays in this browser's DevTools; never relay logs to the server.
+function trace(event, data = {}) {
+  if (!FULL_DEBUG) return;
+  console.log(`[LAN Room debug +${Date.now() - debugStartedAt}ms] ${event}`, data);
+}
+function debugSend(ws, message) {
+  trace('websocket.send', message);
+  ws.send(JSON.stringify(message));
+}
+function tracePeer(peer, event, detail = {}) {
+  if (!FULL_DEBUG) return;
+  trace(event, {
+    peerId: peer.id, deviceName: peer.name, generation: peer.generation,
+    initiator: peer.initiator, attempt: peer.attempt, stage: peer.stage,
+    connectionState: peer.pc.connectionState,
+    iceConnectionState: peer.pc.iceConnectionState,
+    signalingState: peer.pc.signalingState,
+    iceGatheringState: peer.pc.iceGatheringState,
+    channelState: peer.channel?.readyState ?? 'none', ...detail,
+  });
+}
+async function traceStats(peer, event) {
+  if (!FULL_DEBUG) return;
+  try {
+    const stats = await peer.pc.getStats();
+    // Include all browser-exposed ICE candidate addresses and pair fields.
+    tracePeer(peer, event, { stats: Array.from(stats.values(), item => ({ ...item })) });
+  } catch (error) {
+    tracePeer(peer, `${event}.error`, { error: String(error) });
+  }
+}
+if (FULL_DEBUG) {
+  trace('enabled', {
+    url: location.href, userAgent: navigator.userAgent,
+    note: 'Contains credentials, file names, full SDP/ICE and browser-visible IPs; do not publish raw logs.',
+  });
+}
 const state = {
   ws: null, code: '', id: '', token: '', generation: '', leaving: false, peers: new Map(),
   outbound: new Map(), ownOffers: [], offers: new Map(), jobs: [], queue: [], active: null,
@@ -68,11 +110,14 @@ function updateConnectionSummary() {
 function sendSignal(to, signal) {
   const peer = state.peers.get(to);
   if (peer?.generation && state.ws?.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: 'signal', to, toGeneration: peer.generation, signal }));
+    debugSend(state.ws, { type: 'signal', to, toGeneration: peer.generation, signal });
+  } else {
+    trace('signal.skipped', { to, signal, peerGeneration: peer?.generation, websocketState: state.ws?.readyState });
   }
 }
 function sendPeer(peer, control) {
   if (!peer?.ready || peer.channel?.readyState !== 'open') return false;
+  tracePeer(peer, 'datachannel.send', { control });
   peer.channel.send(JSON.stringify(control));
   return true;
 }
@@ -97,7 +142,7 @@ function saveDeviceName(inputId) {
   try { window.localStorage.setItem(DEVICE_NAME_KEY, name); }
   catch { /* Private mode may deny storage. */ }
   if (state.code && state.ws?.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: 'rename', name }));
+    debugSend(state.ws, { type: 'rename', name });
   }
   return name;
 }
@@ -120,6 +165,7 @@ function orderedMessageHandler(handler, reportError) {
   };
 }
 function recordSignalError(message) {
+  trace('signaling.error', { message });
   state.signalErrors += 1;
   state.lastSignalError = String(message || '信令错误')
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]').slice(0, 160);
@@ -133,6 +179,7 @@ function scheduleReconnect(action) {
   if (state.leaving || reconnectTimer !== null || !(state.code || action.code)) return;
   const seconds = Math.min(RECONNECT_MAX_DELAY_MS, 1000 * (2 ** Math.min(reconnectAttempts, 4))) / 1000;
   reconnectAttempts += 1;
+  trace('websocket.reconnect.scheduled', { delaySeconds: seconds, action, currentRoom: state.code });
   feedback(`连接中断，将在 ${seconds} 秒后自动恢复…`, true);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -151,20 +198,28 @@ function connect(action) {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${scheme}://${location.host}/ws`);
   state.ws = ws;
+  trace('websocket.created', { url: ws.url, action, reconnectAttempts });
   ws.addEventListener('open', () => {
-    if (state.ws === ws) ws.send(JSON.stringify(action));
+    trace('websocket.open', { action });
+    if (state.ws === ws) debugSend(ws, action);
   });
   const processMessage = orderedMessageHandler(
     msg => state.ws === ws ? handleServer(msg) : undefined,
-    err => { recordSignalError(err.message); feedback(`连接处理失败：${err.message}`, true); },
+    err => {
+      trace('websocket.message.handler.error', { error: String(err), stack: err?.stack });
+      recordSignalError(err.message);
+      feedback(`连接处理失败：${err.message}`, true);
+    },
   );
   ws.addEventListener('message', event => {
     let msg;
     try { msg = JSON.parse(event.data); }
     catch { return; }
+    trace('websocket.receive', msg);
     void processMessage(msg);
   });
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', event => {
+    trace('websocket.close', { code: event.code, reason: event.reason, wasClean: event.wasClean });
     if (state.ws !== ws) return;
     state.ws = null;
     const wasJoined = Boolean(state.code);
@@ -191,7 +246,8 @@ function connect(action) {
     }
     renderPeers(); renderRequests(); renderJobs(); renderSentFiles();
   });
-  ws.addEventListener('error', () => {
+  ws.addEventListener('error', event => {
+    trace('websocket.error', { type: event.type, readyState: ws.readyState });
     feedback(state.code ? '协调服务暂不可用，正在等待恢复…' : '无法连接协调服务，请检查地址与网络', true);
   });
 }
@@ -212,6 +268,8 @@ async function handleServer(msg) {
       stopReconnect();
       reconnectAttempts = 0;
       state.code = msg.code; state.id = msg.id; state.token = msg.token; state.generation = msg.generation;
+      trace('room.joined', { roomCode: state.code, id: state.id, token: state.token,
+        generation: state.generation, peers: msg.peers, resumed: restored });
       rememberRoom(); showRoom(true); $('room-name').textContent = msg.code;
       $('room-code-input').value = msg.code;
       // Resume may restore a server-side name from before the last local edit.
@@ -245,6 +303,7 @@ async function handleServer(msg) {
 function dropPeer(id, generation) {
   const peer = state.peers.get(id);
   if (!peer || (generation && peer.generation !== generation)) return false;
+  tracePeer(peer, 'peer.dropped');
   clearTimeout(peer.connectTimer);
   state.peers.delete(id);
   peer.pc.close();
@@ -255,13 +314,17 @@ function dropPeer(id, generation) {
 }
 function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
   clearTimeout(peer.connectTimer);
+  tracePeer(peer, 'peer.connect.timeout.scheduled', { delayMs: delay });
   peer.connectTimer = setTimeout(() => {
+    tracePeer(peer, 'peer.connect.timeout.fired', { delayMs: delay });
+    void traceStats(peer, 'peer.connect.timeout.stats');
     if (state.peers.get(peer.id) !== peer || peer.ready ||
         peer.pc.connectionState === 'closed' ||
         (peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected' &&
          peer.pc.iceConnectionState !== 'failed') ||
         state.ws?.readyState !== WebSocket.OPEN) return;
     if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS) {
+      tracePeer(peer, 'peer.renegotiate.initiator', { nextAttempt: peer.attempt + 1 });
       peer.reason = '正在重新协商直连';
       renderPeers();
       void createPeer(peer.id, peer.name, true, peer.generation, peer.attempt + 1, true)
@@ -270,6 +333,7 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
                peer.attempt < PEER_MAX_ATTEMPTS &&
                peer.retryRequests < PEER_MAX_ATTEMPTS - 1) {
       peer.retryRequests += 1;
+      tracePeer(peer, 'peer.renegotiate.responder.request');
       peer.reason = '已请求对方重新协商';
       sendSignal(peer.id, { type: 'retry', attempt: peer.attempt });
       schedulePeerTimeout(peer);
@@ -292,15 +356,28 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, startedAt: Date.now(), connectTimer: null };
   state.peers.set(id, peer);
+  tracePeer(peer, 'peer.created', { force, previousAttempt: previous?.attempt });
+  pc.onsignalingstatechange = () => tracePeer(peer, 'webrtc.signalingstatechange');
+  pc.onicegatheringstatechange = () => tracePeer(peer, 'webrtc.icegatheringstatechange');
+  pc.onicecandidateerror = event => tracePeer(peer, 'webrtc.icecandidateerror', {
+    address: event.address, port: event.port, url: event.url,
+    errorCode: event.errorCode, errorText: event.errorText,
+  });
   // A stuck ICE negotiation must actually create a fresh connection attempt,
   // rather than only replacing the text with a timeout warning.
   schedulePeerTimeout(peer);
   pc.onicecandidate = event => {
+    tracePeer(peer, 'webrtc.icecandidate', {
+      candidate: event.candidate?.toJSON?.() ?? null,
+    });
     if (!event.candidate || state.peers.get(id) !== peer) return;
     const candidate = event.candidate.toJSON();
     // Only private-path host candidates and ICE end-of-candidates signaling.
     // No STUN/TURN; selected host candidates still pass the restricted P2P policy.
-    if (candidate.candidate !== '' && !isHostCandidateLine(candidate.candidate)) return;
+    if (candidate.candidate !== '' && !isHostCandidateLine(candidate.candidate)) {
+      tracePeer(peer, 'webrtc.candidate.filtered', { candidate });
+      return;
+    }
     if (candidate.candidate !== '') peer.candidateCount += 1;
     // A candidate can be emitted during setLocalDescription, before SDP is sent.
     // Buffer locally until offer/answer has been delivered in signaling order.
@@ -308,6 +385,8 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     else peer.localCandidates.push(candidate);
   };
   pc.onconnectionstatechange = () => {
+    tracePeer(peer, 'webrtc.connectionstatechange');
+    void traceStats(peer, 'webrtc.connectionstatechange.stats');
     if (state.peers.get(id) !== peer) return;
     if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
       peer.ready = false;
@@ -320,6 +399,8 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     renderPeers();
   };
   pc.oniceconnectionstatechange = () => {
+    tracePeer(peer, 'webrtc.iceconnectionstatechange');
+    void traceStats(peer, 'webrtc.iceconnectionstatechange.stats');
     if (state.peers.get(id) !== peer) return;
     if (pc.iceConnectionState === 'failed') {
       peer.ready = false;
@@ -328,17 +409,25 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     }
     renderPeers();
   };
-  pc.ondatachannel = event => attachChannel(peer, event.channel);
+  pc.ondatachannel = event => {
+    tracePeer(peer, 'webrtc.datachannel.created', { label: event.channel.label });
+    attachChannel(peer, event.channel);
+  };
   if (initiator) {
     attachChannel(peer, pc.createDataChannel('room-files', { ordered: true }));
+    tracePeer(peer, 'webrtc.createOffer.start');
     const offer = await pc.createOffer();
+    tracePeer(peer, 'webrtc.createOffer.done', { offer });
     await pc.setLocalDescription(offer);
+    tracePeer(peer, 'webrtc.setLocalDescription.done', { localDescription: pc.localDescription });
     sendLocalDescription(peer, 'offer');
   }
   return peer;
 }
 
 function sendLocalDescription(peer, type) {
+  tracePeer(peer, 'webrtc.sendLocalDescription', { type, localDescription: peer.pc.localDescription,
+    queuedCandidates: peer.localCandidates });
   if (state.peers.get(peer.id) !== peer) return;
   sendSignal(peer.id, { type, attempt: peer.attempt, sdp: peer.pc.localDescription.sdp });
   peer.stage = `${type}-sent`;
@@ -348,13 +437,18 @@ function sendLocalDescription(peer, type) {
   }
 }
 async function handleSignal(id, fromGeneration, signal) {
+  trace('webrtc.handleSignal', { from: id, fromGeneration, signal });
   if (!signal || !['offer', 'answer', 'candidate', 'retry'].includes(signal.type) ||
       !Number.isInteger(signal.attempt) || signal.attempt < 0 ||
       signal.attempt > PEER_MAX_ATTEMPTS) return;
   // Both the member generation and the ICE attempt must match. Old trickled
   // candidates cannot affect a newly constructed RTCPeerConnection.
   let peer = state.peers.get(id);
-  if (!peer || peer.generation !== fromGeneration) return;
+  if (!peer || peer.generation !== fromGeneration) {
+    trace('webrtc.signal.ignored.generation', { from: id, fromGeneration,
+      knownGeneration: peer?.generation, signal });
+    return;
+  }
   if (signal.type === 'retry') {
     if (peer.initiator && !peer.ready && signal.attempt === peer.attempt &&
         !(peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected') &&
@@ -375,26 +469,40 @@ async function handleSignal(id, fromGeneration, signal) {
       return; // duplicate offer for the current attempt
     }
     peer.stage = 'offer-received';
+    tracePeer(peer, 'webrtc.setRemoteDescription.offer.start', { sdp: signal.sdp });
     await peer.pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+    tracePeer(peer, 'webrtc.setRemoteDescription.offer.done', { remoteDescription: peer.pc.remoteDescription });
     await flushCandidates(peer);
     const answer = await peer.pc.createAnswer();
+    tracePeer(peer, 'webrtc.createAnswer.done', { answer });
     await peer.pc.setLocalDescription(answer);
+    tracePeer(peer, 'webrtc.setLocalDescription.answer.done', { localDescription: peer.pc.localDescription });
     sendLocalDescription(peer, 'answer');
   } else if (signal.attempt === peer.attempt && signal.type === 'answer') {
     if (!peer.initiator || peer.pc.remoteDescription) return;
     peer.stage = 'answer-received';
+    tracePeer(peer, 'webrtc.setRemoteDescription.answer.start', { sdp: signal.sdp });
     await peer.pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
+    tracePeer(peer, 'webrtc.setRemoteDescription.answer.done', { remoteDescription: peer.pc.remoteDescription });
     await flushCandidates(peer);
   } else if (signal.attempt === peer.attempt && signal.candidate &&
              typeof signal.candidate.candidate === 'string' &&
              (signal.candidate.candidate === '' || isHostCandidateLine(signal.candidate.candidate))) {
     if (signal.candidate.candidate !== '') peer.remoteCandidateCount = (peer.remoteCandidateCount || 0) + 1;
-    if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(signal.candidate);
-    else peer.candidates.push(signal.candidate);
+    if (peer.pc.remoteDescription) {
+      await peer.pc.addIceCandidate(signal.candidate);
+      tracePeer(peer, 'webrtc.addIceCandidate.done', { candidate: signal.candidate });
+    } else {
+      tracePeer(peer, 'webrtc.addIceCandidate.queued', { candidate: signal.candidate });
+      peer.candidates.push(signal.candidate);
+    }
   }
 }
 async function flushCandidates(peer) {
-  for (const candidate of peer.candidates.splice(0)) await peer.pc.addIceCandidate(candidate);
+  for (const candidate of peer.candidates.splice(0)) {
+    await peer.pc.addIceCandidate(candidate);
+    tracePeer(peer, 'webrtc.addIceCandidate.flushed', { candidate });
+  }
 }
 
 function attachChannel(peer, channel) {
@@ -404,23 +512,29 @@ function attachChannel(peer, channel) {
   channel.onmessage = event => {
     if (state.peers.get(peer.id) === peer) receiveChannel(peer, event.data);
   };
+  tracePeer(peer, 'datachannel.attached', { label: channel.label, ordered: channel.ordered });
   channel.onclose = () => {
+    tracePeer(peer, 'datachannel.close');
     if (state.peers.get(peer.id) !== peer) return;
     peer.ready = false; peer.reason = '文件通道已断开';
     schedulePeerTimeout(peer, 5000); renderPeers();
   };
-  channel.onerror = () => {
+  channel.onerror = event => {
+    tracePeer(peer, 'datachannel.error', { eventType: event?.type });
     if (state.peers.get(peer.id) !== peer) return;
     peer.ready = false; peer.reason = '文件通道错误';
     schedulePeerTimeout(peer, 5000); renderPeers();
   };
   channel.onopen = async () => {
+    tracePeer(peer, 'datachannel.open');
+    void traceStats(peer, 'datachannel.open.stats');
     if (state.peers.get(peer.id) !== peer) return;
     for (let count = 0; count < 20 && channel.readyState === 'open' &&
          state.peers.get(peer.id) === peer; count += 1) {
       let verdict;
       try { verdict = await inspectSelectedPath(peer.pc); }
       catch (err) { verdict = { allowed: false, reason: `路径检查失败：${err.message}` }; }
+      tracePeer(peer, 'webrtc.route.verdict', { verdict });
       peer.reason = verdict.reason;
       peer.routeInfo = {
         code: verdict.code ?? 'stats-error',
@@ -431,6 +545,7 @@ function attachChannel(peer, channel) {
       };
       if (verdict.allowed) {
         peer.verified = true;
+        tracePeer(peer, 'datachannel.send.ready');
         channel.send(JSON.stringify({ kind: 'ready' }));
         peer.ready = peer.remoteReady;
         if (peer.ready) clearTimeout(peer.connectTimer);
@@ -456,6 +571,7 @@ async function receiveChannel(peer, data) {
   let msg;
   try { msg = JSON.parse(data); }
   catch { return; }
+  tracePeer(peer, 'datachannel.receive', { message: msg });
   if (msg.kind === 'ready') {
     peer.remoteReady = true;
     peer.ready = peer.verified;
@@ -528,6 +644,8 @@ function handleBinary(peer, data) {
 async function startSendingFile(peer, request) {
   const offer = state.outbound.get(request.offerId);
   const file = offer?.get(request.fileId);
+  tracePeer(peer, 'file.send.request', { request, fileName: file?.name,
+    fileSize: file?.size });
   if (!file || !peer.ready) {
     sendPeer(peer, { kind: 'file-error', fileId: request.fileId, message: '原文件已不可用，请重新选择发送' });
     return;
@@ -655,6 +773,9 @@ function shareFiles(files) {
   if (files.some(file => file.size > MAX_FILE_BYTES)) { feedback('技术原型每个文件最大 32 MB', true); return; }
   const offerId = crypto.randomUUID();
   const fileMap = new Map();
+  trace('file.share.selection', { files: files.map(file => ({
+    name: file.name, size: file.size, type: file.type, lastModified: file.lastModified,
+  })) });
   const metadata = files.map(file => {
     const id = crypto.randomUUID(); fileMap.set(id, file);
     return { id, name: file.name, size: file.size };
