@@ -138,6 +138,26 @@ class SignallingTests(AioHTTPTestCase):
         await b.close()
         await c.close()
 
+    async def test_ice_end_of_candidates_is_forwarded_without_enabling_relay(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        a = await self.client.ws_connect("/ws", headers=origin)
+        await a.send_json({"type": "enter", "code": "EOCROOM", "name": "A"})
+        await a.receive_json()
+        b = await self.client.ws_connect("/ws", headers=origin)
+        await b.send_json({"type": "enter", "code": "EOCROOM", "name": "B"})
+        b_welcome = await b.receive_json()
+        await a.receive_json()  # peer-online
+        await a.send_json({"type": "signal", "to": b_welcome["id"], "signal": {
+            "type": "candidate", "candidate": {"candidate": "", "sdpMid": "0", "sdpMLineIndex": 0}}})
+        forwarded = await b.receive_json()
+        self.assertEqual(forwarded["signal"]["candidate"]["candidate"], "")
+        await a.send_json({"type": "signal", "to": b_welcome["id"], "signal": {
+            "type": "candidate", "candidate": {
+                "candidate": "candidate:1 1 udp 1 203.0.113.1 11111 typ srflx", "sdpMid": "0"}}})
+        self.assertEqual((await a.receive_json())["type"], "error")
+        await a.close()
+        await b.close()
+
     async def test_device_name_module_is_served(self):
         response = await self.client.get("/static/device-name.js")
         self.assertEqual(response.status, 200)
