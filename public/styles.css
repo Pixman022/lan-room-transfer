@@ -95,6 +95,12 @@ main { min-height: calc(100vh - 76px); }
 .room-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
 .stack { display: flex; flex-direction: column; gap: 18px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 17px; }
+.section-tools { display: flex; align-items: center; gap: 10px; }
+.section-tools .text-button { padding: 4px; }
+.diagnostics-panel { margin-top: 14px; background: var(--tint-blue); border: 1px solid var(--line); border-radius: 12px; padding: 12px; font-size: 12px; }
+.diagnostics-content { display: grid; gap: 7px; margin-bottom: 10px; }
+.diagnostic-line { margin: 0; overflow-wrap: anywhere; color: var(--muted); }
+.diagnostic-line strong { color: var(--text); font-weight: 650; }
 .small { font-size: 12px; }
 .peer-panel { min-height: 420px; }
 .device-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }

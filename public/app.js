@@ -38,7 +38,19 @@ function feedback(text, error = false) {
 function showRoom(visible) {
   $('room-screen').hidden = !visible;
   $('home-screen').hidden = visible;
-  $('connection-status').textContent = visible ? '已连接' : '未连接';
+  updateConnectionSummary();
+}
+function updateConnectionSummary() {
+  const status = $('connection-status');
+  if ($('room-screen').hidden) {
+    status.textContent = '未连接';
+    status.dataset.state = 'offline';
+    return;
+  }
+  const peers = [...state.peers.values()];
+  const ready = peers.filter(peer => peer.ready).length;
+  status.textContent = ready ? '文件直连就绪' : peers.length ? '直连未就绪' : '房间已连接';
+  status.dataset.state = ready ? 'ready' : 'waiting';
 }
 function sendSignal(to, signal) {
   if (state.ws?.readyState === WebSocket.OPEN) {
@@ -169,9 +181,12 @@ async function createPeer(id, name, initiator) {
       peer.ready = false;
       peer.reason = `连接状态：${pc.connectionState}`;
       if (state.active?.peerId === id) failActive('设备连接中断');
+    } else if (pc.connectionState === 'connected' && !peer.ready) {
+      peer.reason = '正在验证局域网路径';
     }
     renderPeers();
   };
+  pc.oniceconnectionstatechange = () => renderDiagnostics();
   pc.ondatachannel = event => attachChannel(peer, event.channel);
   if (initiator) {
     attachChannel(peer, pc.createDataChannel('room-files', { ordered: true }));
@@ -415,7 +430,8 @@ function shareFiles(files) {
   state.ownOffers.push({ offerId, files: metadata });
   for (const peer of state.peers.values()) syncSharedOffers(peer);
   renderSentFiles();
-  feedback('已共享到房间');
+  const ready = [...state.peers.values()].filter(peer => peer.ready).length;
+  feedback(ready ? '文件已加入房间共享列表' : '文件已添加，等待设备直连');
 }
 function withdrawSharedFile(offerId, fileId) {
   const offer = state.ownOffers.find(item => item.offerId === offerId);
@@ -457,7 +473,7 @@ function renderPeers() {
   const list = $('peer-list');
   list.replaceChildren();
   const peers = [...state.peers.values()];
-  $('device-count').textContent = `${peers.length} 台`;
+  $('device-count').textContent = `${peers.length} 台 · ${peers.filter(p => p.ready).length} 可传`;
   if (!peers.length) list.append(elem('p', 'empty', '暂无其他设备'));
   for (const peer of peers) {
     const row = elem('div', 'device-row');
@@ -467,7 +483,53 @@ function renderPeers() {
     row.append(info);
     list.append(row);
   }
+  updateConnectionSummary();
+  renderDiagnostics();
+  renderSentFiles();
 }
+function diagnosticsSnapshot() {
+  return {
+    signal: state.ws?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
+    peerCount: state.peers.size,
+    peers: [...state.peers.values()].map((peer, index) => ({
+      device: index + 1,
+      connection: peer.pc?.connectionState ?? 'unknown',
+      ice: peer.pc?.iceConnectionState ?? 'unknown',
+      channel: peer.channel?.readyState ?? 'none',
+      routeVerified: Boolean(peer.verified),
+      peerVerified: Boolean(peer.remoteReady),
+      canTransfer: Boolean(peer.ready),
+      // Do not copy room codes, member names, IP addresses or file names.
+      reason: String(peer.reason ?? '').replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]').slice(0, 180),
+    })),
+  };
+}
+function renderDiagnostics() {
+  const panel = $('diagnostics-panel');
+  if (panel.hidden) return;
+  const data = diagnosticsSnapshot();
+  const root = $('diagnostics-content');
+  root.replaceChildren();
+  const header = elem('p', 'diagnostic-line', data.peerCount ? `设备：${data.peerCount} · 可传：${data.peers.filter(peer => peer.canTransfer).length}` : '尚无其他设备');
+  root.append(header);
+  for (const peer of data.peers) {
+    const line = elem('p', 'diagnostic-line');
+    line.append(elem('strong', '', `设备 ${peer.device}  `));
+    line.append(document.createTextNode(`${peer.connection} / ${peer.ice} / ${peer.channel} · ${peer.reason || '等待连接'}`));
+    root.append(line);
+  }
+}
+$('toggle-diagnostics').addEventListener('click', () => {
+  const panel = $('diagnostics-panel');
+  panel.hidden = !panel.hidden;
+  $('toggle-diagnostics').setAttribute('aria-expanded', String(!panel.hidden));
+  renderDiagnostics();
+});
+$('copy-diagnostics').addEventListener('click', async () => {
+  const report = JSON.stringify(diagnosticsSnapshot(), null, 2);
+  try { await navigator.clipboard.writeText(report); feedback('诊断已复制'); }
+  catch { feedback('复制未成功，请截图诊断区域', true); }
+});
 function renderSentFiles() {
   const container = $('sent-files');
   container.replaceChildren();
@@ -477,7 +539,8 @@ function renderSentFiles() {
     const line = elem('div', 'file-row');
     line.append(elem('span', 'file-icon', '↑'));
     const info = elem('div', 'item-info');
-    info.append(elem('strong', '', file.name), elem('span', '', `${humanSize(file.size)} · 已共享`));
+    const count = [...state.peers.values()].filter(peer => peer.ready).length;
+    info.append(elem('strong', '', file.name), elem('span', '', `${humanSize(file.size)} · ${count ? `可供 ${count} 台设备接收` : '等待设备直连'}`));
     line.append(info);
     addButton(line, '移除', () => withdrawSharedFile(file.offerId, file.id), 'quiet-button small-button');
     container.append(line);
