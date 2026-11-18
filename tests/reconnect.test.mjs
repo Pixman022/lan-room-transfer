@@ -214,74 +214,81 @@ test('temporary room-entry rejection during recovery continues backoff', async (
   assert.equal([...t.timers.values()][0].ms,2000);
 });
 
-test('initiator replaces stalled ICE attempts and ignores old answers and candidates', async () => {
+test('initial phone offerer yields to PC after ICE stalls, isolating old candidates', async () => {
   const t = harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
-  const socket = t.FakeWebSocket.sockets[0];
-  await join(t, socket);
-  await t.run('createPeer("other", "Sky Deer", true, "gen-peer")');
-  assert.equal(t.state.peers.get('other').attempt, 1);
-  assert.deepEqual(socket.sent.at(-1).signal, {type:'offer',attempt:1,sdp:'offer-sdp'});
-  assert.equal(t.FakeRTCPeerConnection.instances.length, 1);
-  assert.equal([...t.timers.values()][0].ms, 15000);
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('createPeer("pc","Desktop",true,"gen-pc")');
+  const first=t.state.peers.get('pc');
+  assert.equal(first.attempt,1);
+  assert.equal(first.initiator,true);
+  assert.equal(socket.sent.at(-1).signal.type,'offer');
 
   fireNextTimer(t);
-  await new Promise(resolve => setImmediate(resolve));
-  const peer2=t.state.peers.get('other');
-  assert.equal(peer2.attempt, 2);
-  assert.equal(t.FakeRTCPeerConnection.instances[0].connectionState, 'closed');
-  assert.equal(t.FakeRTCPeerConnection.instances.length, 2);
-  assert.equal(socket.sent.at(-1).signal.attempt, 2);
+  await new Promise(resolve=>setImmediate(resolve));
+  const second=t.state.peers.get('pc');
+  assert.equal(first.pc.connectionState,'closed');
+  assert.equal(second.attempt,2);
+  assert.equal(second.initiator,false);
+  assert.equal(second.originalInitiator,true);
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'role-switch',attempt:1});
 
-  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:1,sdp:"stale"})');
-  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 7777 typ host"}})');
-  assert.equal(peer2.pc.remoteDescription,null);
-  assert.equal(peer2.pc.candidates.length,0);
-  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:2,sdp:"fresh"})');
-  assert.equal(peer2.pc.remoteDescription.sdp, 'fresh');
-  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.3 7778 typ host"}})');
-  assert.equal(peer2.pc.candidates.length,1);
+  await t.run('handleSignal("pc","gen-pc",{type:"answer",attempt:1,sdp:"stale"})');
+  await t.run('handleSignal("pc","gen-pc",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 7777 typ host"}})');
+  assert.equal(second.pc.remoteDescription,null);
+  assert.equal(second.pc.candidates.length,0);
 
-  await t.run('handleSignal("other","gen-peer",{type:"retry",attempt:2})');
-  assert.equal(t.state.peers.get('other').attempt,3);
-  assert.equal(socket.sent.at(-1).signal.attempt,3);
+  await t.run('handleSignal("pc","gen-pc",{type:"offer",attempt:2,sdp:"pc-offer"})');
+  assert.equal(second.pc.remoteDescription.sdp,'pc-offer');
+  assert.equal(second.stage,'answer-sent');
+  assert.equal(socket.sent.at(-1).signal.type,'answer');
+  assert.equal(socket.sent.at(-1).signal.attempt,2);
+  await t.run('handleSignal("pc","gen-pc",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.3 7778 typ host"}})');
+  assert.equal(second.pc.candidates.length,1);
+
   fireNextTimer(t);
-  assert.equal(t.state.peers.get('other').attempt,3,'retry stops at 3 attempts');
-  assert.match(t.state.peers.get('other').reason,/多次尝试未成功/);
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'retry',attempt:2});
+  await t.run('handleSignal("pc","gen-pc",{type:"offer",attempt:3,sdp:"pc-retry"})');
+  assert.equal(t.state.peers.get('pc').attempt,3);
+  assert.equal(t.state.peers.get('pc').initiator,false);
+  fireNextTimer(t);
+  assert.match(t.state.peers.get('pc').reason,/多次尝试未成功/);
 });
 
-test('responder requests a new offer after answer-sent hangs in ICE new', async () => {
+test('initial PC answerer takes over the offerer role after ICE stalls', async () => {
   const t=harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
   const socket=t.FakeWebSocket.sockets[0];
   await join(t,socket);
-  await t.run('handleServer({type:"peer-online",id:"other",name:"Sky Deer",generation:"gen-peer"})');
-  const peer0=t.state.peers.get('other');
+  await t.run('handleServer({type:"peer-online",id:"phone",name:"Mobile",generation:"gen-phone"})');
+  const peer0=t.state.peers.get('phone');
   assert.equal(peer0.attempt,0);
-  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:1,sdp:"initial"})');
-  const peer1=t.state.peers.get('other');
-  assert.equal(peer1.stage,'answer-sent');
-  assert.equal(peer1.attempt,1);
-  assert.equal(peer1.pc.remoteDescription.sdp,'initial');
-  assert.equal(socket.sent.at(-1).signal.attempt,1);
+  assert.equal(peer0.initiator,false);
+  await t.run('handleSignal("phone","gen-phone",{type:"offer",attempt:1,sdp:"phone-offer"})');
+  const first=t.state.peers.get('phone');
+  assert.equal(first.stage,'answer-sent');
+  assert.equal(first.attempt,1);
+  assert.equal(socket.sent.at(-1).signal.type,'answer');
 
   fireNextTimer(t);
-  const request=socket.sent.at(-1);
-  assert.equal(request.signal.type,'retry');
-  assert.equal(request.signal.attempt,1);
-  assert.equal(t.state.peers.get('other'),peer1);
+  await new Promise(resolve=>setImmediate(resolve));
+  const second=t.state.peers.get('phone');
+  assert.notEqual(second,first);
+  assert.equal(first.pc.connectionState,'closed');
+  assert.equal(second.initiator,true);
+  assert.equal(second.originalInitiator,false);
+  assert.equal(second.attempt,2);
+  assert.deepEqual(socket.sent.at(-2).signal,{type:'role-switch',attempt:1});
+  assert.equal(socket.sent.at(-1).signal.type,'offer');
+  assert.equal(socket.sent.at(-1).signal.attempt,2);
 
-  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:2,sdp:"retry-offer"})');
-  const peer2=t.state.peers.get('other');
-  assert.notEqual(peer2,peer1);
-  assert.equal(peer1.pc.connectionState,'closed');
-  assert.equal(peer2.stage,'answer-sent');
-  assert.equal(peer2.attempt,2);
-  assert.equal(peer2.pc.remoteDescription.sdp,'retry-offer');
-  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
-  assert.equal(peer2.pc.candidates.length,0);
-  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
-  assert.equal(peer2.pc.candidates.length,1);
+  await t.run('handleSignal("phone","gen-phone",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
+  assert.equal(second.pc.candidates.length,0);
+  await t.run('handleSignal("phone","gen-phone",{type:"answer",attempt:2,sdp:"mobile-answer"})');
+  assert.equal(second.pc.remoteDescription.sdp,'mobile-answer');
+  await t.run('handleSignal("phone","gen-phone",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
+  assert.equal(second.pc.candidates.length,1);
 });
 
 test('healthy open DataChannel is not replaced when connection timer fires', async () => {
@@ -361,4 +368,58 @@ test('default mode does not log room credentials or raw SDP', async () => {
   await join(t, socket);
   await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
   assert.equal(t.debugMessages.length, 0);
+});
+
+test('role switch is idempotent when both phone and PC time out concurrently', async () => {
+  const phone=harness();
+  const pc=harness();
+  for(const t of [phone,pc]){
+    t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+    await join(t,t.FakeWebSocket.sockets[0]);
+  }
+  await phone.run('createPeer("pc","Desktop",true,"gen-pc")');
+  await pc.run('createPeer("phone","Mobile",false,"gen-phone")');
+  const originalPhone=phone.state.peers.get('pc');
+  const originalPc=pc.state.peers.get('phone');
+
+  // Let both independently hit the 15-second timer before either receives
+  // the other side's role-switch notification.
+  fireNextTimer(phone);
+  fireNextTimer(pc);
+  await new Promise(resolve=>setImmediate(resolve));
+  const phone2=phone.state.peers.get('pc');
+  const pc2=pc.state.peers.get('phone');
+  assert.equal(phone2.initiator,false);
+  assert.equal(pc2.initiator,true);
+  assert.equal(phone2.attempt,2);
+  assert.equal(pc2.attempt,2);
+  assert.equal(originalPhone.pc.connectionState,'closed');
+  assert.equal(originalPc.pc.connectionState,'closed');
+
+  await phone.run('handleSignal("pc","gen-pc",{type:"role-switch",attempt:1})');
+  await pc.run('handleSignal("phone","gen-phone",{type:"role-switch",attempt:1})');
+  assert.equal(phone.state.peers.get('pc'),phone2);
+  assert.equal(pc.state.peers.get('phone'),pc2);
+  const offer=pc.FakeWebSocket.sockets[0].sent.at(-1).signal;
+  assert.equal(offer.type,'offer');
+  await phone.run('handleSignal("pc","gen-pc",{type:"offer",attempt:2,sdp:"pc-offer"})');
+  const answer=phone.FakeWebSocket.sockets[0].sent.at(-1).signal;
+  assert.equal(answer.type,'answer');
+  assert.equal(answer.attempt,2);
+  await pc.run('handleSignal("phone","gen-phone",{type:"answer",attempt:2,sdp:"phone-answer"})');
+  assert.equal(pc2.pc.remoteDescription.sdp,'phone-answer');
+  assert.equal(pc.FakeRTCPeerConnection.instances.length,2);
+  assert.equal(phone.FakeRTCPeerConnection.instances.length,2);
+});
+
+test('role switch is refused once the first P2P connection is ready', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("phone","Mobile",false,"gen-phone")');
+  const peer=t.state.peers.get('phone');
+  peer.ready=true;
+  await t.run('handleSignal("phone","gen-phone",{type:"role-switch",attempt:1})');
+  assert.equal(t.state.peers.get('phone'),peer);
+  assert.equal(peer.initiator,false);
 });
