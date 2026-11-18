@@ -200,7 +200,8 @@ class SignallingTests(AioHTTPTestCase):
         c = await self.client.ws_connect("/ws", headers=origin)
         await c.send_json({"type": "enter", "code": "TESTNAME", "name": "Device-C"})
         joined = await c.receive_json()
-        self.assertIn({"id": first["id"], "name": "Laptop-New"}, joined["peers"])
+        self.assertIn({"id": first["id"], "name": "Laptop-New",
+                       "generation": first["generation"]}, joined["peers"])
         await a.close()
         await b.close()
         await c.close()
