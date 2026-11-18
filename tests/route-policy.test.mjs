@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assessPair, inspectSelectedPath, isHostCandidateLine, parseIPv4 } from '../public/route-policy.js';
+import { assessPair, candidateAddressKind, inspectSelectedPath, isHostCandidateLine, parseIPv4 } from '../public/route-policy.js';
 
 test('host ICE candidate is accepted with or without trailing attributes', () => {
   const host = 'candidate:1 1 udp 100 192.168.1.5 5555 typ host';
@@ -28,6 +28,8 @@ test('relay, public, loopback, mdns, ipv6 and opaque addresses fail closed', () 
   assert.equal(pair('192.168.1.3', '8.8.8.8').allowed, false);
   assert.equal(pair('127.0.0.1', '127.0.0.2').allowed, false);
   assert.equal(pair('test.local', '192.168.1.4').allowed, false);
+  assert.equal(pair('test.local', '192.168.1.4').code, 'mdns-obfuscated');
+  assert.equal(pair(undefined, '192.168.1.4').code, 'address-hidden');
   assert.equal(pair('fc00::1', 'fc00::2').allowed, false);
   assert.equal(pair('100.64.0.1', '100.64.0.2').allowed, false);
   assert.equal(pair(undefined, '192.168.1.4').allowed, false);
@@ -43,6 +45,17 @@ test('selected candidate stats must be readable and host/private', async () => {
   ]);
   assert.equal((await inspectSelectedPath({getStats: async () => good})).allowed, true);
   good.set('b', {type: 'remote-candidate', candidateType: 'host', address: 'f00.local'});
-  assert.equal((await inspectSelectedPath({getStats: async () => good})).allowed, false);
-  assert.equal((await inspectSelectedPath({getStats: async () => new Map()})).allowed, false);
+  const mdns = await inspectSelectedPath({getStats: async () => good});
+  assert.equal(mdns.allowed, false);
+  assert.equal(mdns.code, 'mdns-obfuscated');
+  assert.equal(mdns.remoteAddressKind, 'mdns');
+  assert.equal(mdns.localAddressKind, 'private-ipv4');
+  good.set('b', {type: 'remote-candidate', candidateType: 'host', address: null});
+  const hidden = await inspectSelectedPath({getStats: async () => good});
+  assert.equal(hidden.code, 'address-hidden');
+  assert.equal(hidden.remoteAddressKind, 'hidden');
+  assert.equal(candidateAddressKind({address: '::'}), 'redacted');
+  assert.equal(candidateAddressKind({address: '8.8.8.8'}), 'other-ipv4');
+  assert.equal(candidateAddressKind({address: 'fc00::5'}), 'ipv6');
+  assert.equal((await inspectSelectedPath({getStats: async () => new Map()})).code, 'pair-unavailable');
 });
