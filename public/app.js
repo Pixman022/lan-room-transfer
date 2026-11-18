@@ -7,6 +7,9 @@ import { generateRandomRoomCode, normalizeRoomCode } from './room-code.js';
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
 const MAX_FILES = 20;
+const RECONNECT_MAX_DELAY_MS = 15000;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
 const TRANSFER_IDLE_MS = 30000;
 const $ = id => document.getElementById(id);
 const state = {
@@ -48,6 +51,11 @@ function updateConnectionSummary() {
   if ($('room-screen').hidden) {
     status.textContent = '未连接';
     status.dataset.state = 'offline';
+    return;
+  }
+  if (state.ws?.readyState !== WebSocket.OPEN || !state.generation) {
+    status.textContent = '正在恢复连接';
+    status.dataset.state = 'waiting';
     return;
   }
   const peers = [...state.peers.values()];
@@ -115,14 +123,35 @@ function recordSignalError(message) {
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]').slice(0, 160);
   renderDiagnostics();
 }
+function stopReconnect() {
+  if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+function scheduleReconnect(action) {
+  if (state.leaving || reconnectTimer !== null || !(state.code || action.code)) return;
+  const seconds = Math.min(RECONNECT_MAX_DELAY_MS, 1000 * (2 ** Math.min(reconnectAttempts, 4))) / 1000;
+  reconnectAttempts += 1;
+  feedback(`连接中断，将在 ${seconds} 秒后自动恢复…`, true);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (state.leaving || state.ws) return;
+    connect({
+      type: 'enter', code: state.code || action.code, name: deviceName(),
+      ...(state.id && state.token ? { id: state.id, token: state.token } : {}),
+    });
+  }, seconds * 1000);
+}
 function connect(action) {
   if (state.ws && state.ws.readyState < WebSocket.CLOSING) return;
-  feedback('正在连接协调服务…');
+  stopReconnect();
+  feedback(state.code ? '正在恢复房间连接…' : '正在连接协调服务…');
   state.leaving = false;
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${scheme}://${location.host}/ws`);
   state.ws = ws;
-  ws.addEventListener('open', () => ws.send(JSON.stringify(action)));
+  ws.addEventListener('open', () => {
+    if (state.ws === ws) ws.send(JSON.stringify(action));
+  });
   const processMessage = orderedMessageHandler(
     msg => state.ws === ws ? handleServer(msg) : undefined,
     err => { recordSignalError(err.message); feedback(`连接处理失败：${err.message}`, true); },
@@ -136,19 +165,33 @@ function connect(action) {
   ws.addEventListener('close', () => {
     if (state.ws !== ws) return;
     state.ws = null;
-    for (const peer of state.peers.values()) {
+    const wasJoined = Boolean(state.code);
+    state.generation = '';
+    const oldPeers = [...state.peers.values()];
+    state.peers.clear();
+    for (const peer of oldPeers) {
       clearTimeout(peer.connectTimer);
       peer.pc.close();
     }
-    state.peers.clear();
     failActive('信令连接断开');
-    showRoom(false);
-    renderPeers();
-    if (!state.leaving) feedback('协调服务已断开，可尝试恢复房间会话', true);
-    state.code = ''; state.generation = ''; state.ownOffers = []; state.outbound.clear(); state.offers.clear();
-    renderSentFiles(); renderRequests();
+    for (const job of state.queue.splice(0)) {
+      job.status = '失败：连接已中断';
+      job.chunks = [];
+    }
+    state.offers.clear();
+    if (!state.leaving && (wasJoined || action.code)) {
+      // Keep locally staged File objects; renewed peers receive their catalog.
+      showRoom(wasJoined);
+      scheduleReconnect(action);
+    } else {
+      showRoom(false);
+      state.code = ''; state.ownOffers = []; state.outbound.clear();
+    }
+    renderPeers(); renderRequests(); renderJobs(); renderSentFiles();
   });
-  ws.addEventListener('error', () => feedback('无法连接协调服务，请检查地址与网络', true));
+  ws.addEventListener('error', () => {
+    feedback(state.code ? '协调服务暂不可用，正在等待恢复…' : '无法连接协调服务，请检查地址与网络', true);
+  });
 }
 async function handleServer(msg) {
   switch (msg.type) {
@@ -158,7 +201,10 @@ async function handleServer(msg) {
       // A failed room entry must not leave the page stuck on an open WS.
       if (!state.code && state.ws) { state.leaving = true; state.ws.close(); }
       break;
-    case 'welcome':
+    case 'welcome': {
+      const restored = Boolean(state.code);
+      stopReconnect();
+      reconnectAttempts = 0;
       state.code = msg.code; state.id = msg.id; state.token = msg.token; state.generation = msg.generation;
       rememberRoom(); showRoom(true); $('room-name').textContent = msg.code;
       $('room-code-input').value = msg.code;
@@ -166,9 +212,10 @@ async function handleServer(msg) {
       if (msg.name !== currentDeviceName) {
         state.ws?.send(JSON.stringify({ type: 'rename', name: currentDeviceName }));
       }
-      feedback('已进入房间，等待设备 P2P 直连');
+      feedback(restored ? '房间连接已恢复，正在重建 P2P 直连' : '已进入房间，等待设备 P2P 直连');
       for (const other of msg.peers) await createPeer(other.id, other.name, true, other.generation);
       renderPeers(); renderRequests(); renderJobs(); renderSentFiles(); break;
+    }
     case 'peer-online':
       if (msg.id !== state.id) await createPeer(msg.id, msg.name, false, msg.generation);
       renderPeers(); break;
@@ -234,6 +281,7 @@ async function createPeer(id, name, initiator, generation) {
     else peer.localCandidates.push(candidate);
   };
   pc.onconnectionstatechange = () => {
+    if (state.peers.get(id) !== peer) return;
     if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
       peer.ready = false;
       peer.reason = `连接状态：${pc.connectionState}`;
@@ -244,6 +292,7 @@ async function createPeer(id, name, initiator, generation) {
     renderPeers();
   };
   pc.oniceconnectionstatechange = () => {
+    if (state.peers.get(id) !== peer) return;
     if (pc.iceConnectionState === 'failed') {
       peer.ready = false;
       peer.reason = '\u0049\u0043\u0045 \u68c0\u67e5\u5931\u8d25\uff1a\u8bf7\u68c0\u67e5\u662f\u5426\u5728\u540c\u4e00 Wi-Fi\u3001\u8bbf\u5ba2\u9694\u79bb\u6216 VPN';
@@ -517,8 +566,9 @@ function cancelJob(job) {
 }
 function retryJob(job) {
   if (!job.status.startsWith('失败') && job.status !== '已取消') return;
-  job.received = 0; job.chunks = []; job.cancelled = false; job.status = '排队中';
   const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
+  if (!offer) { feedback('共享文件列表已更新，请在房间文件中重新选择', true); return; }
+  job.received = 0; job.chunks = []; job.cancelled = false; job.status = '排队中';
   const file = offer?.files.find(f => f.id === job.fileId);
   if (file) file.status = 'queued';
   state.queue.push(job); renderJobs(); renderRequests(); startNext();
@@ -799,6 +849,8 @@ $('enter-room').onclick = () => {
 $('leave-room').onclick = () => {
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
   state.leaving = true;
+  stopReconnect();
+  reconnectAttempts = 0;
   sessionStorage.removeItem('lan-room-session');
   for (const job of state.jobs) if (job.url) URL.revokeObjectURL(job.url);
   state.jobs = []; state.queue = []; state.active = null; state.offers.clear(); state.outbound.clear();
