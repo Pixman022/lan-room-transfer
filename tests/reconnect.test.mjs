@@ -349,9 +349,9 @@ test('full debug mode prints raw credentials, SDP, candidate addresses and file 
   assert.match(dump, /local-token/);
   assert.match(dump, /5832/);
   assert.match(dump, /offer-sdp/);
-  assert.match(dump, /10\\.12\\.34\\.56/);
-  assert.match(dump, /192\\.168\\.9\\.4/);
-  assert.match(dump, /private-debug-file\\.txt/);
+  assert.ok(dump.includes('10.12.34.56'));
+  assert.ok(dump.includes('192.168.9.4'));
+  assert.ok(dump.includes('private-debug-file.txt'));
 });
 
 test('default mode does not log room credentials or raw SDP', async () => {
