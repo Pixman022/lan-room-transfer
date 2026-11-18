@@ -10,7 +10,7 @@
 - Reuse custom codes later without a permanent owner/account. A currently active code identifies only one room.
 - The same entry rule applies to random and custom codes. Room code suggestions do not reserve a room in advance; another user can claim that code first. Let everyone with a room code enter without waiting for approval.
 - Show an English **Color + Animal** device name by default (such as `Coral Fox` or `Silver Otter`), without a numeric suffix unless needed for future name-collision handling. Persist it in the current browser; allow edits before entering or inside a room. Changes appear to other members without changing underlying device identity.
-- After entering a room, show online devices and incoming requests immediately. Each verified device has a direct **Send Files** action; clicking it opens the file picker and automatically shares a file list. Also support selecting an online device and then clicking or dropping files into a prominent drop zone. No duplicate recipient dropdown or separate Send Offer step. File bytes still require receiver approval.
+- After entering a room, share files directly from a central drop zone or file picker, without selecting an individual receiver. Each verified connected member sees every online uploader's shared file list; members joining later receive the existing file catalog through direct peer channels. Sharing exposes only file metadata, not file contents, until each member chooses to receive. A shared file can be withdrawn by its uploader. If the uploader disconnects, their file list disappears and the file bytes become unavailable. No room file bytes or file metadata are intentionally stored by the public signalling server.
 - Receive individual files by clicking **Receive** next to the file or click **Receive All** for all remaining files in that offer. **No checkboxes, Select All, or Receive Selected.**
 - Keep one active inbound transfer per receiving device; view file-level progress, cancel and retry failures.
 - Download with default browser behavior, optionally choose a save location on browsers that support it.
@@ -27,7 +27,7 @@ Internet is allowed for accessing the HTTPS page and performing initial signalli
 ## First delivery scope
 
 - Warm light-orange theme (replacing the previous green), off-white background, rounded white cards, soft orange accents, animal avatars, and minimal instructional text. Reference style is friendly and spacious, not a direct brand or asset copy.
-- Compact home and room workspace: online devices left, file drop area on the right, incoming per-file list, sequential queue, and compact device rename. No separate multistep send flow.
+- Compact home and room workspace: presence-only online device list left, shared file drop area on the right, room-wide file catalog with per-file receive/receive-all, sequential receiver queue, and compact device rename. No recipient selection or separate send confirmation.
 - Desktop and mobile responsive UI.
 - User-visible invalid-code, room-full, not-connected, route-blocked and transfer-failed states.
 - Initial supported environment: different devices under the same router and directly reachable private IPv4 network.

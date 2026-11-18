@@ -17,6 +17,10 @@ The signalling service keeps active room codes in one global process. If users i
 
 The home screen suggests a currently unused 4-digit code, **but does not reserve it**. By design, entering any code creates the room if absent and joins it if present. If someone else claims that four-digit code between suggestion and entry, the original user will join that room instead. Show members clearly and provide an easy regenerate option; a strict guarantee that suggested codes always create a new room would require reserving a code, a product behavior not selected for this version.
 
+## P1 — Ephemeral room file shelf
+
+The shared file catalog lives only in each uploader's browser memory and is replicated to verified room members over WebRTC; it is not persisted by the signalling service. Late joiners can discover files only while their uploader remains connected and a qualifying peer path is available. Refreshing, closing, or disconnecting the uploader removes its offers, including files others have not yet downloaded. This is not cloud storage or a persistent room drive.
+
 ## P1 — Reliability and mobile downloads
 
 The current receiver buffers the entire file (up to 32 MiB) before offering a browser download link. Long files/large transfers need streaming output with user-selected file handles where supported, or a robust fallback with explicit browser limitations. Do not claim a 1 GB mobile file is supported without live tests. A browser does not reliably continue transmitting when mobile OS backgrounds the tab.

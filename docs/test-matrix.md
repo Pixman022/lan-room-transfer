@@ -19,16 +19,18 @@ Status: **not executed** on actual two-device LAN. These are the acceptance gate
 | ROOM-04 | All leave longer than 2 min | Code reusable as fresh room | Unit tested, field pending |
 | NAME-01 | Browser first visit, then reload and rejoin | Color + Animal generated name persists; old generated Chinese label+digits migrates | Unit tested; offline UI passed, live pending |
 | NAME-02 | Rename while in a room | Other online peers see the new name; member ID and room remain unchanged | Signalling API tested, offline browser UI passed; live pending |
-| UX-01 | Room shows another verified peer | Click peer Send Files; file chooser opens and chosen metadata is sent to that peer; no recipient dropdown or separate Send Offer step | Offline browser UI harness passed; LAN field test pending |
-| UX-02 | Peer connection fails local-route check | Send Files is disabled on that device row | Offline browser UI harness passed; field test pending |
-| UX-03 | Verified peer selected then a file is dragged into drop zone | Only the selected peer receives file metadata; drop zone lists recent offered files | Offline desktop/mobile UI harness passed; LAN field test pending |
+| UX-01 | Enter room alone and choose a file | File is staged in the room with no recipient selection, even before another device joins | Offline browser UI harness passed; LAN field test pending |
+| UX-02 | Two verified devices join after first file is shared | Both receive the current file catalog through their own peer channels | Offline browser UI harness passed; field test pending |
+| UX-03 | Upload another file with two verified devices connected | Both see the new file metadata, not its bytes; unverified peers receive no catalog | Offline desktop/mobile UI harness passed; LAN field test pending |
+| UX-04 | Uploading device withdraws file | File disappears from other room devices and is unavailable to new joiners | Offline browser UI harness passed; LAN field test pending |
+| UX-05 | Uploading device goes offline | Its shared files disappear from the room; already downloaded files remain available locally | Offline browser UI harness passed; LAN field test pending |
 | FILE-01 | Receiver clicks one file's Receive | Only that file is transferred | Browser pending |
 | FILE-02 | Receiver clicks Receive All | Remaining files transferred sequentially | Browser pending |
 | FILE-03 | Cancel, disconnect, retry | Clear states; no data mixed between jobs | Browser pending |
 | FILE-04 | 10 MB, then 100 MB, then 1 GB | Track time, memory and save success; larger files are **future** goals | 10 MB possible within cap, live test pending; others unsupported |
-| MOBILE-01 | Android Chrome | Join, select target, receive, save | Not run |
-| MOBILE-02 | iOS Safari | Join, select target, receive, save | Not run |
+| MOBILE-01 | Android Chrome | Join, share files directly, receive, save | Not run |
+| MOBILE-02 | iOS Safari | Join, share files directly, receive, save | Not run |
 
 For every test record: browser/version, operating system, selected ICE candidate types/addresses (redacted), route verdict, bytes actually sent, file hash verification, user-visible error, and pass/fail. Do not collect filenames or file bytes in public service logs.
 
-Offline UI interaction harness (`python tests/offline_room_ui.py`) uses mocked peer connections, not real signalling or file bytes. It checks room actions, English default names and animal avatars, picker-to-offer, drag-and-drop, peer disabled state, single/receive-all controls, sequential queue, inline rename, and mobile/desktop overflow; screenshots in `docs/*-static.png` reflect this test fixture only.
+Offline UI interaction harness (`python tests/offline_room_ui.py`) uses mocked peer connections, not real signalling or file bytes. It checks room entry, English names and animal avatars, sharing before any peers arrive, room-wide file announcements, late-join synchronization, withdrawal, single/receive-all controls, sequential queue, inline rename, and mobile/desktop overflow; screenshots in `docs/*-static.png` reflect this test fixture only.

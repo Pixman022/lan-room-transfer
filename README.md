@@ -34,7 +34,7 @@ The Render Free web-service plan may sleep during inactivity and wake with a del
 - Browser WebRTC DataChannel (`iceServers: []`); conservative candidate-pair check before allowing file transfers
 - Friendly default **English Color + Animal** name (for example `Amber Bear` or `Coral Fox`) on first visit, saved in the browser; editable on the home page or inside a room. Old automatically generated Chinese `label-1234` defaults are migrated, while user-chosen names are preserved. Name updates propagate without changing device identity. A browser refresh can restore the room using the existing single entry action
 - **Warm pale-orange visual design**, white cards on a soft peach background, short labels and playful animal avatars (inspired by the visual reference supplied for this separate project)
-- Room workspace with direct **Send Files** actions on connected devices, plus a drop zone: click a device to select it, then click/drag files into the drop zone; the file list is sent immediately (no extra confirmation). Unverified peers cannot receive file offers. Incoming requests retain single-file **Receive** and **Receive All** only
+- Room-wide ephemeral file shelf: **drop or choose files immediately after entering**—no recipient selection. All verified connected peers see shared file names and sizes, and later joiners receive the uploader's current catalog. Peers decide independently whether to **Receive** or **Receive All**. File bytes transfer only on explicit receipt over verified local WebRTC channels. The uploader can withdraw a shared file. No file bytes or metadata are intentionally stored by the public signalling server. Shared files disappear from the room when the uploading device leaves or disconnects.
 - Global one-file-at-a-time receiver queue, cancellation/retry controls and progress
 - Browser download link after receiving a file; each file is limited to **32 MiB** in this POC
 - Desktop/mobile responsive UI draft
@@ -59,7 +59,7 @@ python -m unittest discover -s tests -v
 node --test tests/*.test.mjs
 ```
 
-The offline `python tests/offline_room_ui.py` harness (Playwright/Chromium) validates device avatar updates, room buttons, device selection, direct file picker, drag/drop, receive controls, queue display, rename, and desktop/mobile overflow with mocked peers. Generated screenshots in `docs/*-static.png` are fixture-based UI demonstrations, not evidence of working device-to-device transfer.
+The offline `python tests/offline_room_ui.py` harness (Playwright/Chromium) validates device names, uploading with no peers, announcements to all verified devices, late-join catalog synchronization, withdrawal, receive controls, queue display, rename, and desktop/mobile overflow with mocked peers. Generated screenshots in `docs/*-static.png` are fixture-based UI demonstrations, not evidence of working device-to-device transfer.
 
 The optional `tests/browser_smoke.py` requires Playwright/Chromium and a locally running server. It was not successfully run in the current isolated execution environment because Chromium's administrator policy blocks local HTTP connections. Static desktop/mobile screenshots in `docs/` were rendered without network access and do **not** constitute a functional browser test.
 
@@ -105,7 +105,7 @@ docs/test-matrix.md        manual field test plan
 - One entry action automatically creates a missing room or enters an existing one. Room code suggestions are not reserved, so concurrent users could claim a suggested code before it is submitted.
 - Custom code can be reused after room expires, with no permanent ownership.
 - Creator departure does not close room; room persists while members remain and for 2 minutes after the last leaves.
-- The receiver sees all file names and sizes, can receive one file or all remaining files. No checkboxes, no "receive selected".
+- Verified room members see file names and sizes from online uploaders, including files shared before they joined. Each member can receive one file or all remaining files in an offer, independently of others. No checkboxes, no "receive selected".
 - One active inbound file at a time per receiving browser, with progress, cancellation and retry.
 
 See `docs/test-matrix.md` for the practical validation order before V1 development.
