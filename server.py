@@ -230,11 +230,15 @@ async def ws_handler(request):
                         asyncio.create_task(old_ws.close(code=4001, message=b"Session replaced"))
                 peers = [{"id": p.id, "name": p.name, "generation": p.generation}
                          for p in room.online() if p.id != member.id]
+                # Existing members must hear peer-online before the newcomer can
+                # receive welcome and send an ICE offer. Otherwise an early offer
+                # can reach a browser before its peer object exists and be dropped.
+                # The existing member's WebSocket preserves this message order.
+                await announce(room, {"type": "peer-online", "id": member.id,
+                                      "generation": member.generation, "name": member.name}, member.id)
                 await send(ws, {"type": "welcome", "code": room.code, "id": member.id,
                                 "generation": member.generation, "token": member.token,
                                 "name": member.name, "peers": peers, "created": created})
-                await announce(room, {"type": "peer-online", "id": member.id,
-                                      "generation": member.generation, "name": member.name}, member.id)
             elif kind == "rename":
                 if not room or not member:
                     raise ValueError("尚未加入房间")
