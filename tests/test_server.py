@@ -294,7 +294,20 @@ class SignallingTests(AioHTTPTestCase):
         forwarded = await b.receive_json()
         self.assertEqual(forwarded["signal"]["attempt"], 2)
 
+        # The failed original offerer may ask the answerer to take the offerer
+        # role without changing rooms, WebSocket identity, or the ICE policy.
+        await b.send_json({"type": "signal", "to": a_welcome["id"],
+                           "toGeneration": a_welcome["generation"],
+                           "signal": {"type": "role-switch", "attempt": 1}})
+        reversed_roles = await a.receive_json()
+        self.assertEqual(reversed_roles["signal"], {"type": "role-switch", "attempt": 1})
+        self.assertEqual(reversed_roles["fromGeneration"], b_welcome["generation"])
+
         for payload in (
+            {"type": "role-switch", "attempt": 0},
+            {"type": "role-switch", "attempt": 2},
+            {"type": "role-switch", "attempt": 1, "candidate": {}},
+            {"type": "role-switch", "attempt": True},
             {"type": "retry", "attempt": -1},
             {"type": "retry", "attempt": True},
             {"type": "retry", "attempt": 4},
