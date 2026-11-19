@@ -41,7 +41,7 @@ with sync_playwright() as pw:
     assert a.locator('#connection-status').inner_text() == '直连未就绪', 'same-host route must remain blocked'
     a.locator('#toggle-diagnostics').click()
     assert a.locator('#diagnostics-panel').is_visible()
-    assert a.locator('#diagnostics-content .diagnostic-line').count() == 2
+    assert a.locator('#diagnostics-content .diagnostic-line').count() == 4
     a.locator('#toggle-diagnostics').click()
     with a.expect_file_chooser() as chooser:
         a.locator('#drop-zone').click()
