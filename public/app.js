@@ -122,7 +122,8 @@ function sendSignal(to, signal) {
 }
 // Privacy-reduced counters expose control-flow failures without file IDs,
 // names, room codes, candidate addresses or packet payloads.
-const TRANSFER_CONTROLS = new Set(['request-file', 'file-request-ack', 'file-start', 'file-end', 'file-error']);
+const TRANSFER_CONTROLS = new Set(['request-file', 'file-request-ack', 'file-start', 'file-end', 'file-error',
+  'cancel-file', 'file-canceled']);
 function countTransfer(peer, event) {
   if (!peer) return;
   peer.transferEvents ??= {};
@@ -743,20 +744,27 @@ async function receiveChannel(peer, data) {
       renderJobs();
     }
   } else if (msg.kind === 'cancel-file') {
-    peer.sending.get(msg.fileId)?.cancel();
+    const sending = peer.sending.get(msg.fileId);
+    if (sending) sending.cancel();
+    else sendPeer(peer, { kind: 'file-canceled', fileId: msg.fileId });
   } else if (msg.kind === 'file-start') {
     const job = state.active;
     if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId || job.offerId !== msg.offerId || msg.size !== job.size) {
       countTransfer(peer, 'start-ignored-mismatch');
       return;
     }
+    // A file-start already in transit must not undo a user's cancellation.
+    if (job.cancelled) return;
     job.status = '传输中'; job.received = 0; job.chunks = [];
     armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时'); renderJobs();
   } else if (msg.kind === 'file-end') {
     const job = state.active;
     if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId ||
-        job.offerId !== msg.offerId || job.status !== '传输中') return;
+        job.offerId !== msg.offerId) return;
+    // The sender may have completed before it received cancel-file. With an
+    // ordered DataChannel, file-end safely terminates that cancelled stream.
     if (job.cancelled) { finishJob('已取消'); return; }
+    if (job.status !== '传输中') return;
     if (job.received !== job.size) { failActive('文件大小不匹配'); return; }
     if (!isSha256Hex(msg.sha256)) { failActive('发送端缺少有效校验值，请双方刷新后重试'); return; }
     job.status = '校验中';
@@ -774,10 +782,16 @@ async function receiveChannel(peer, data) {
       if (state.active === job) failActive(`文件校验失败：${err.message}`);
     }
   } else if (msg.kind === 'file-canceled') {
-    if (state.active?.peerId === peer.id && state.active?.fileId === msg.fileId) finishJob('已取消');
+    const job = state.active;
+    if (job?.peerId === peer.id && job.fileId === msg.fileId && job.cancelled) {
+      finishJob('已取消');
+    }
   } else if (msg.kind === 'file-error') {
-    if (state.active?.peerId === peer.id && state.active?.fileId === msg.fileId) failActive(msg.message || '发送方读取失败');
-    else countTransfer(peer, 'error-ignored-mismatch');
+    const job = state.active;
+    if (job?.peerId === peer.id && job.fileId === msg.fileId) {
+      if (job.cancelled) finishJob('已取消');
+      else failActive(msg.message || '发送方读取失败');
+    } else countTransfer(peer, 'error-ignored-mismatch');
   }
 }
 function handleBinary(peer, data) {
@@ -802,6 +816,8 @@ async function startSendingFile(peer, request) {
   }
   if (peer.sending.has(request.fileId)) {
     countTransfer(peer, 'duplicate-request-ignored');
+    sendPeer(peer, { kind: 'file-error', fileId: request.fileId,
+      message: '上一笔传输尚未结束，请稍后重试' });
     return;
   }
   const token = { cancelled: false, cancel() { this.cancelled = true; } };
@@ -892,8 +908,14 @@ function finishJob(status) {
 function failActive(reason) { if (state.active) finishJob(`失败：${reason}`); }
 function cancelJob(job) {
   if (state.active === job) {
+    if (job.cancelled) return;
     job.cancelled = true;
     job.chunks = [];
+    if (job.status === '校验中') {
+      // file-end has already arrived; no sender acknowledgement is needed.
+      finishJob('已取消');
+      return;
+    }
     state.peers.get(job.peerId) && sendPeer(state.peers.get(job.peerId), { kind: 'cancel-file', fileId: job.fileId });
     job.status = '正在取消';
     renderJobs();
@@ -1057,6 +1079,10 @@ function diagnosticsSnapshot() {
         duplicateRequests: peer.transferEvents?.['duplicate-request-ignored'] || 0,
         sourceUnavailable: peer.transferEvents?.['source-unavailable'] || 0,
         senderFailures: peer.transferEvents?.['sender-failed'] || 0,
+        cancelsSent: peer.transferEvents?.['cancel-file:sent'] || 0,
+        cancelsReceived: peer.transferEvents?.['cancel-file:received'] || 0,
+        cancelAcksSent: peer.transferEvents?.['file-canceled:sent'] || 0,
+        cancelAcksReceived: peer.transferEvents?.['file-canceled:received'] || 0,
         ignoredStarts: peer.transferEvents?.['start-ignored-mismatch'] || 0,
         ignoredErrors: peer.transferEvents?.['error-ignored-mismatch'] || 0,
         lastEvent: peer.lastTransferEvent || 'none',
@@ -1308,7 +1334,7 @@ function renderJobs() {
     if (job.url) {
       const a = elem('a', 'download-link', '保存'); a.href = job.url; a.download = job.name; actions.append(a);
     } else if (state.active === job || state.queue.includes(job)) {
-      addButton(actions, '取消', () => cancelJob(job), 'secondary small-button');
+      if (!job.cancelled) addButton(actions, '取消', () => cancelJob(job), 'secondary small-button');
     } else if (job.status.startsWith('失败') || job.status === '已取消') {
       addButton(actions, '重试', () => retryJob(job), 'secondary small-button');
     }
