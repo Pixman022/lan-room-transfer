@@ -398,6 +398,10 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   if (!generation) return null;
   const previous = state.peers.get(id);
   if (previous?.generation === generation && !force) return previous;
+  // Preserve timing across ICE retries, but start a new measurement after a
+  // previously successful connection has to be rebuilt.
+  const firstAttemptStartedAt = previous?.generation === generation && !previous.readyAt
+    ? (previous.firstAttemptStartedAt ?? previous.startedAt ?? Date.now()) : Date.now();
   if (previous) dropPeer(id, previous.generation);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
@@ -405,7 +409,7 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
-    startedAt: Date.now(), connectTimer: null };
+    startedAt: Date.now(), firstAttemptStartedAt, readyAt: null, connectTimer: null };
   state.peers.set(id, peer);
   tracePeer(peer, 'peer.created', { force, previousAttempt: previous?.attempt });
   pc.onsignalingstatechange = () => tracePeer(peer, 'webrtc.signalingstatechange');
@@ -604,7 +608,10 @@ async function verifyPeerPath(peer) {
     peer.localReadySent = true;
     peer.ready = peer.remoteReady;
     peer.reason = peer.ready ? '文件直连就绪' : '文件通道已打开，等待对端完成安全路径验证';
-    if (peer.ready) clearTimeout(peer.connectTimer);
+    if (peer.ready) {
+      peer.readyAt ??= Date.now();
+      clearTimeout(peer.connectTimer);
+    }
     syncSharedOffers(peer);
   }
   renderPeers();
@@ -660,6 +667,7 @@ async function receiveChannel(peer, data) {
     peer.remoteReady = true;
     peer.remoteHostPairVerified = msg.hostHostVerified === true;
     peer.ready = peer.verified;
+    if (peer.ready) peer.readyAt ??= Date.now();
     tracePeer(peer, 'datachannel.ready.received', {
       localReadySent: peer.localReadySent, localRouteVerified: peer.verified,
       remoteHostPairVerified: peer.remoteHostPairVerified,
@@ -986,7 +994,13 @@ function diagnosticsSnapshot() {
       iceGathering: peer.pc?.iceGatheringState ?? 'unknown',
       localDescriptionSet: Boolean(peer.pc?.localDescription),
       remoteDescriptionSet: Boolean(peer.pc?.remoteDescription),
-      elapsedSeconds: Math.floor((Date.now() - (peer.startedAt || Date.now())) / 1000),
+      elapsedSeconds: Math.floor((Date.now() - (peer.startedAt ?? Date.now())) / 1000),
+      // From the first RTC peer attempt to P2P-ready; unlike elapsedSeconds,
+      // this includes ICE retries and freezes when the handshake completes.
+      setupElapsedSeconds: Math.max(0, Math.round(
+        ((peer.readyAt ?? Date.now()) - (peer.firstAttemptStartedAt ?? peer.startedAt ?? Date.now())) / 1000)),
+      timeToReadySeconds: peer.readyAt === null || peer.readyAt === undefined ? null
+        : Math.max(0, Math.round((peer.readyAt - peer.firstAttemptStartedAt) / 1000)),
       candidatesSent: peer.candidateCount || 0,
       candidatesReceived: peer.remoteCandidateCount || 0,
       canTransfer: Boolean(peer.ready),
@@ -1162,6 +1176,8 @@ function renderDiagnostics() {
     if (peer.route) {
       root.append(elem('p', 'diagnostic-line', `路径：${peer.route.code}（本地 ${peer.route.localAddressKind} / 远端 ${peer.route.remoteAddressKind}）`));
     }
+    root.append(elem('p', 'diagnostic-line',
+      `第 ${peer.attempt} 次协商 · 累计 ${peer.setupElapsedSeconds} 秒 · ${peer.timeToReadySeconds === null ? '仍在连接' : '直连就绪'}`));
     root.append(elem('p', 'diagnostic-line',
       `文件请求 发/收 ${peer.transfer.requestsSent}/${peer.transfer.requestsReceived} · 确认 发/收 ${peer.transfer.acksSent}/${peer.transfer.acksReceived} · 启动 发/收 ${peer.transfer.startsSent}/${peer.transfer.startsReceived} · 最近 ${peer.transfer.lastEvent}`));
   }
