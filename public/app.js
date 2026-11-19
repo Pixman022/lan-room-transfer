@@ -336,6 +336,24 @@ function dropPeer(id, generation) {
   renderPeers(); renderRequests(); renderJobs();
   return true;
 }
+// Keep only bounded, redacted per-attempt outcomes. Browser IPs, SDP,
+ // credentials and file metadata must never enter ordinary diagnostics.
+function iceAttemptSnapshot(peer, outcome) {
+  return {
+    attempt: peer.attempt,
+    role: peer.initiator ? 'offerer' : 'answerer',
+    outcome,
+    durationSeconds: Math.max(0, Math.round(
+      ((peer.readyAt ?? peer.exhaustedAt ?? Date.now()) - peer.startedAt) / 1000)),
+    stage: peer.stage,
+    ice: peer.pc.iceConnectionState,
+    connection: peer.pc.connectionState,
+    channel: peer.channel?.readyState ?? 'none',
+    candidatesSent: peer.candidateCount || 0,
+    candidatesReceived: peer.remoteCandidateCount || 0,
+    retryTrigger: peer.retryTrigger ?? null,
+  };
+}
 function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
   clearTimeout(peer.connectTimer);
   tracePeer(peer, 'peer.connect.timeout.scheduled', { delayMs: delay });
@@ -358,6 +376,10 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
       }
       return;
     }
+    peer.retryTrigger = peer.pc.iceConnectionState === 'failed' ? 'ice-failed'
+      : peer.pc.connectionState === 'failed' ? 'transport-failed'
+      : peer.pc.connectionState === 'disconnected' ? 'transport-disconnected'
+      : 'timeout';
     if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS &&
         peer.attempt !== PEER_PRIMARY_ATTEMPTS) {
       tracePeer(peer, 'peer.renegotiate.initiator', { nextAttempt: peer.attempt + 1 });
@@ -389,6 +411,7 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
       schedulePeerTimeout(peer);
       renderPeers();
     } else {
+      peer.exhaustedAt ??= Date.now();
       peer.reason = '直连多次尝试未成功：请检查设备网络或防火墙';
       renderPeers();
     }
@@ -400,8 +423,13 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   if (previous?.generation === generation && !force) return previous;
   // Preserve timing across ICE retries, but start a new measurement after a
   // previously successful connection has to be rebuilt.
-  const firstAttemptStartedAt = previous?.generation === generation && !previous.readyAt
+  const sameUnreadySequence = previous?.generation === generation && !previous.readyAt;
+  const firstAttemptStartedAt = sameUnreadySequence
     ? (previous.firstAttemptStartedAt ?? previous.startedAt ?? Date.now()) : Date.now();
+  const attemptHistory = sameUnreadySequence
+    ? [...(previous.attemptHistory || []),
+        ...(previous.attempt > 0 ? [iceAttemptSnapshot(previous, 'replaced')] : [])].slice(-3)
+    : [];
   if (previous) dropPeer(id, previous.generation);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
@@ -409,7 +437,8 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
-    startedAt: Date.now(), firstAttemptStartedAt, readyAt: null, connectTimer: null };
+    startedAt: Date.now(), firstAttemptStartedAt, readyAt: null, connectTimer: null,
+    attemptHistory, retryTrigger: null, exhaustedAt: null };
   state.peers.set(id, peer);
   tracePeer(peer, 'peer.created', { force, previousAttempt: previous?.attempt });
   pc.onsignalingstatechange = () => tracePeer(peer, 'webrtc.signalingstatechange');
@@ -1001,6 +1030,8 @@ function diagnosticsSnapshot() {
         ((peer.readyAt ?? Date.now()) - (peer.firstAttemptStartedAt ?? peer.startedAt ?? Date.now())) / 1000)),
       timeToReadySeconds: peer.readyAt === null || peer.readyAt === undefined ? null
         : Math.max(0, Math.round((peer.readyAt - peer.firstAttemptStartedAt) / 1000)),
+      iceAttempts: [...peer.attemptHistory, iceAttemptSnapshot(peer,
+        peer.ready ? 'ready' : peer.exhaustedAt ? 'exhausted' : 'in-progress')],
       candidatesSent: peer.candidateCount || 0,
       candidatesReceived: peer.remoteCandidateCount || 0,
       canTransfer: Boolean(peer.ready),
@@ -1178,6 +1209,8 @@ function renderDiagnostics() {
     }
     root.append(elem('p', 'diagnostic-line',
       `第 ${peer.attempt} 次协商 · 累计 ${peer.setupElapsedSeconds} 秒 · ${peer.timeToReadySeconds === null ? '尚未就绪' : `首次就绪耗时 ${peer.timeToReadySeconds} 秒`}`));
+    root.append(elem('p', 'diagnostic-line',
+      `协商记录：${peer.iceAttempts.map(a => `#${a.attempt} ${a.role} ${a.ice}/${a.outcome}`).join(' → ')}`));
     root.append(elem('p', 'diagnostic-line',
       `文件请求 发/收 ${peer.transfer.requestsSent}/${peer.transfer.requestsReceived} · 确认 发/收 ${peer.transfer.acksSent}/${peer.transfer.acksReceived} · 启动 发/收 ${peer.transfer.startsSent}/${peer.transfer.startsReceived} · 最近 ${peer.transfer.lastEvent}`));
   }
