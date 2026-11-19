@@ -251,9 +251,26 @@ test('initiator replaces stalled ICE attempts and ignores old answers and candid
   await t.run('handleSignal("other","gen-peer",{type:"retry",attempt:2})');
   assert.equal(t.state.peers.get('other').attempt,3);
   assert.equal(socket.sent.at(-1).signal.attempt,3);
+  const peer3=t.state.peers.get('other');
   fireNextTimer(t);
-  assert.equal(t.state.peers.get('other').attempt,3,'retry stops at 3 attempts');
-  assert.match(t.state.peers.get('other').reason,/多次尝试未成功/);
+  await new Promise(resolve => setImmediate(resolve));
+  const reversed=t.state.peers.get('other');
+  assert.equal(reversed.initiator,false,'original offerer becomes answerer only after three failures');
+  assert.equal(reversed.attempt,4);
+  assert.equal(peer3.pc.connectionState,'closed');
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'retry',attempt:4});
+
+  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:3,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.3 7778 typ host"}})');
+  assert.equal(reversed.pc.candidates.length,0,'old candidates cannot leak into reversed ICE');
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:4,sdp:"reverse-offer"})');
+  assert.equal(reversed.stage,'answer-sent');
+  assert.equal(reversed.pc.remoteDescription.sdp,'reverse-offer');
+  assert.equal(socket.sent.at(-1).signal.type,'answer');
+  assert.equal(socket.sent.at(-1).signal.attempt,4);
+
+  fireNextTimer(t);
+  assert.equal(t.state.peers.get('other'),reversed,'fallback ends after fourth attempt');
+  assert.match(reversed.reason,/多次尝试未成功/);
 });
 
 test('responder requests a new offer after answer-sent hangs in ICE new', async () => {
@@ -288,6 +305,51 @@ test('responder requests a new offer after answer-sent hangs in ICE new', async 
   assert.equal(peer2.pc.candidates.length,0);
   await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 4444 typ host"}})');
   assert.equal(peer2.pc.candidates.length,1);
+});
+
+test('original answerer takes offerer role only on bounded reverse retry', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('handleServer({type:"peer-online",id:"other",name:"Sky Deer",generation:"gen-peer"})');
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:3,sdp:"old-offer"})');
+  const old=t.state.peers.get('other');
+  assert.equal(old.initiator,false);
+  assert.equal(old.attempt,3);
+
+  await t.run('handleSignal("other","gen-peer",{type:"retry",attempt:4})');
+  const reversed=t.state.peers.get('other');
+  assert.equal(old.pc.connectionState,'closed');
+  assert.equal(reversed.initiator,true);
+  assert.equal(reversed.attempt,4);
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'offer',attempt:4,sdp:'offer-sdp'});
+
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:3,sdp:"stale-answer"})');
+  assert.equal(reversed.pc.remoteDescription,null);
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:4,sdp:"new-answer"})');
+  assert.equal(reversed.pc.remoteDescription.sdp,'new-answer');
+
+  const before=socket.sent.length;
+  fireNextTimer(t);
+  assert.equal(t.state.peers.get('other'),reversed);
+  assert.equal(socket.sent.length,before,'the final attempt must not loop');
+});
+
+test('healthy connected channel awaiting reciprocal ready never triggers reverse offer', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer",3)');
+  const peer=t.state.peers.get('other');
+  peer.channel.readyState='open';
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  const before=socket.sent.length;
+  fireNextTimer(t);
+  assert.equal(t.state.peers.get('other'),peer);
+  assert.equal(socket.sent.length,before,'never swap when ICE transport is healthy');
 });
 
 test('healthy open DataChannel is not replaced when connection timer fires', async () => {
