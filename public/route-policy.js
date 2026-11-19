@@ -113,8 +113,13 @@ export async function inspectSelectedPath(pc, {
   }
   const local = report.get(pair.localCandidateId);
   const remote = report.get(pair.remoteCandidateId);
+  // Some browsers omit "nominated" in getStats(). The transport's selected
+  // pair ID (or Firefox's explicit selected flag) is evidence of the actively
+  // selected pair; never override an explicitly false nominated flag.
+  const selectedAndNominated = pair.nominated === true ||
+    (pair.nominated == null && (selectedByTransport || pair.selected === true));
   const verifiedReflexive = local?.candidateType === 'host' && remote?.candidateType === 'prflx' &&
-    pair.state === 'succeeded' && pair.nominated === true &&
+    pair.state === 'succeeded' && selectedAndNominated &&
     pc.connectionState === 'connected' &&
     ['connected', 'completed'].includes(pc.iceConnectionState) &&
     channelOpen && remoteReady;
@@ -126,8 +131,17 @@ export async function inspectSelectedPath(pc, {
   // successful pair and an established transport. Never send candidate IPs.
   const hostHostVerified = verdict.allowed &&
     local?.candidateType === 'host' && remote?.candidateType === 'host' &&
-    pair.state === 'succeeded' && (pair.nominated === true || selectedByTransport) &&
+    pair.state === 'succeeded' && selectedAndNominated &&
     pc.connectionState === 'connected' &&
     ['connected', 'completed'].includes(pc.iceConnectionState) && channelOpen;
-  return { ...verdict, hostHostVerified };
+  // No IPs, hostnames, ports, ICE IDs or credentials in normal diagnostics.
+  const reflexiveEvidence = local?.candidateType === 'host' && remote?.candidateType === 'prflx'
+    ? {
+      pairState: pair.state ?? 'unavailable',
+      nominated: pair.nominated === true ? 'yes' : pair.nominated === false ? 'no' : 'missing',
+      selectedByTransport, selectedByPairFlag: pair.selected === true,
+      remoteReady, remoteHostPairVerified, channelOpen,
+      localAddressKind: verdict.localAddressKind, remoteAddressKind: verdict.remoteAddressKind,
+    } : null;
+  return { ...verdict, hostHostVerified, reflexiveEvidence };
 }
