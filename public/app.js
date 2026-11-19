@@ -324,9 +324,20 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
     void traceStats(peer, 'peer.connect.timeout.stats');
     if (state.peers.get(peer.id) !== peer || peer.ready ||
         peer.pc.connectionState === 'closed' ||
-        (peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected' &&
-         peer.pc.iceConnectionState !== 'failed') ||
         state.ws?.readyState !== WebSocket.OPEN) return;
+    if (peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected' &&
+        peer.pc.iceConnectionState !== 'failed') {
+      // RTC transport is healthy; a missing app-level ready must not trigger
+      // ICE renegotiation, but must not appear to be a completed transfer path.
+      if (peer.verified && !peer.remoteReady) {
+        peer.reason = '文件通道已打开，但尚未收到对端的安全路径确认';
+        tracePeer(peer, 'datachannel.ready.timeout', {
+          localReadySent: peer.localReadySent, remoteReady: peer.remoteReady,
+        });
+        renderPeers();
+      }
+      return;
+    }
     if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS) {
       tracePeer(peer, 'peer.renegotiate.initiator', { nextAttempt: peer.attempt + 1 });
       peer.reason = '正在重新协商直连';
@@ -355,7 +366,7 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   if (previous) dropPeer(id, previous.generation);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
-    pc, channel: null, verified: false, remoteReady: false,
+    pc, channel: null, verified: false, remoteReady: false, localReadySent: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
@@ -561,7 +572,9 @@ function attachChannel(peer, channel) {
         peer.verified = true;
         tracePeer(peer, 'datachannel.send.ready');
         channel.send(JSON.stringify({ kind: 'ready' }));
+        peer.localReadySent = true;
         peer.ready = peer.remoteReady;
+        peer.reason = peer.ready ? '文件直连就绪' : '文件通道已打开，等待对端完成安全路径验证';
         if (peer.ready) clearTimeout(peer.connectTimer);
         syncSharedOffers(peer);
         renderPeers();
@@ -589,7 +602,13 @@ async function receiveChannel(peer, data) {
   if (msg.kind === 'ready') {
     peer.remoteReady = true;
     peer.ready = peer.verified;
-    if (peer.ready) clearTimeout(peer.connectTimer);
+    tracePeer(peer, 'datachannel.ready.received', {
+      localReadySent: peer.localReadySent, localRouteVerified: peer.verified,
+    });
+    if (peer.ready) {
+      peer.reason = '文件直连就绪';
+      clearTimeout(peer.connectTimer);
+    }
     syncSharedOffers(peer);
     renderPeers();
     return;
@@ -867,6 +886,7 @@ function diagnosticsSnapshot() {
       ice: peer.pc?.iceConnectionState ?? 'unknown',
       channel: peer.channel?.readyState ?? 'none',
       routeVerified: Boolean(peer.verified),
+      localReadySent: Boolean(peer.localReadySent),
       peerVerified: Boolean(peer.remoteReady),
       route: peer.routeInfo,
       stage: peer.stage || 'unknown',
@@ -959,6 +979,10 @@ async function buildDiagnosticsReport() {
     return {
       device: index + 1, id: peer.id, name: peer.name, generation: peer.generation,
       initiator: peer.initiator, attempt: peer.attempt, stage: peer.stage,
+      handshake: {
+        localPathVerified: peer.verified, localReadySent: peer.localReadySent,
+        remoteReadyReceived: peer.remoteReady, transferReady: peer.ready,
+      },
       localDescription: peer.pc.localDescription?.toJSON?.() ?? peer.pc.localDescription ?? null,
       remoteDescription: peer.pc.remoteDescription?.toJSON?.() ?? peer.pc.remoteDescription ?? null,
       receivedCandidates: peer.remoteCandidateCount || 0,
