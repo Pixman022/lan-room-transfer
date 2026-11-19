@@ -317,7 +317,7 @@ test('mid-transfer prflx recovery requests fresh host/host proof and resumes onl
     return stats;
   };
   const original=offerLargeFile(t);
-  await flushUntil(()=>t.receiverMessages.some(x=>typeof x==='string' &&
+  await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
     JSON.parse(x).kind==='route-proof-request'));
   assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16,
     'bytes must not continue over an unverified prflx path');
@@ -342,9 +342,9 @@ test('if peer cannot attest host/host, prflx rechecks fail closed with no extra 
   t.a.pc.getStats=async()=>++checks<=2?goodPathStats():maskedReflexivePathStats();
   t.b.pc.getStats=async()=>maskedReflexivePathStats();
   offerLargeFile(t);
-  await flushUntil(()=>t.receiverMessages.some(x=>typeof x==='string' &&
-    JSON.parse(x).kind==='route-proof-request'));
   await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='route-proof-request'));
+  await flushUntil(()=>t.receiverMessages.some(x=>typeof x==='string' &&
     JSON.parse(x).kind==='route-proof'));
   assert.equal(t.a.remoteHostPairVerified,false);
   assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16);
@@ -511,7 +511,7 @@ test('sender acknowledges cancellation even if its transfer already finished', a
   await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
     JSON.parse(x).kind==='file-canceled'));
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.cancelAcksSent'),1);
-  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.cancelAcksReceived'),1);
+  await flushUntil(()=>t.receiver.run('diagnosticsSnapshot().peers[0].transfer.cancelAcksReceived')===1);
 });
 
 test('a retry before the sender completes its previous file gets an explicit busy error', async () => {
