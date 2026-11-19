@@ -174,12 +174,13 @@ async function linkedFilePeers({tamperBinary = () => false} = {}) {
   };
   return {sender,receiver,a,b,senderMessages,receiverMessages};
 }
-async function flushUntil(predicate, turns=250) {
-  for(let i=0;i<turns;i++){
+async function flushUntil(predicate, maxMs=2000) {
+  const deadline=Date.now()+maxMs;
+  while(Date.now()<deadline){
     if(predicate())return;
-    await new Promise(resolve=>setImmediate(resolve));
+    await new Promise(resolve=>setTimeout(resolve,5));
   }
-  assert.fail('file-transfer condition was not reached within the test event-loop turns');
+  assert.fail('file-transfer condition was not reached within the test deadline');
 }
 
 test('receive queue transfers multiple batches serially with real SHA-256, including an empty file', async () => {
@@ -275,8 +276,10 @@ test('retry of a withdrawn file is rejected when its offer still has other files
   t.run('failActive("模拟失败")');
   t.run('withdrawPeerFile("sender","offer-a","f1")');
   assert.equal(t.state.offers.get('sender:offer-a').files.length,1);
+  assert.equal(t.state.jobs[0].status,'已撤回','withdrawal removes stale retry action');
+  t.run('state.jobs[0].status="失败：模拟失败"');
   t.run('retryJob(state.jobs[0])');
-  assert.equal(t.state.jobs[0].status,'失败：模拟失败','do not queue withdrawn files');
+  assert.equal(t.state.jobs[0].status,'已撤回','stale retry cannot queue a withdrawn file');
   assert.equal(t.state.active,null);
   assert.equal(t.state.queue.length,0);
   assert.equal(sent.length,1,'do not send another request for a withdrawn file');
