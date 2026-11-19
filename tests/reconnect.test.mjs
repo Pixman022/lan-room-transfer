@@ -652,6 +652,80 @@ test('phone selected host/prflx is gated until PC ready then completes reciproca
   await pendingOpen;
 });
 
+test('connected host/host sends a route-verified ready attestation without candidate addresses', async () => {
+  const t=harness({realRoutePolicy:true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("phone","Phone",true,"gen-phone")');
+  const peer=t.state.peers.get('phone');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  peer.pc.getStats=async()=>new Map([
+    ['t',{type:'transport',selectedCandidatePairId:'p'}],
+    ['p',{type:'candidate-pair',state:'succeeded',nominated:true,localCandidateId:'l',remoteCandidateId:'r'}],
+    ['l',{type:'local-candidate',candidateType:'host',address:'desktop.local'}],
+    ['r',{type:'remote-candidate',candidateType:'host',address:'phone.local'}],
+  ]);
+  const channel=peer.channel;
+  channel.readyState='open';
+  channel.sent=[];
+  channel.send=data=>channel.sent.push(JSON.parse(data));
+  await channel.onopen();
+  assert.equal(peer.localReadySent,true);
+  assert.equal(peer.verified,true);
+  assert.equal(peer.remoteReady,false);
+  assert.deepEqual(channel.sent,[{kind:'ready',hostHostVerified:true}]);
+  assert.ok(!JSON.stringify(channel.sent).includes('desktop.local'));
+});
+
+test('fully masked host/prflx stays blocked for legacy ready, then unlocks after host/host attestation', async () => {
+  const t=harness({realRoutePolicy:true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("pc","Desktop",true,"gen-pc")');
+  const peer=t.state.peers.get('pc');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  const stats=new Map([
+    ['t',{type:'transport',selectedCandidatePairId:'p'}],
+    ['p',{type:'candidate-pair',state:'succeeded',nominated:true,localCandidateId:'l',remoteCandidateId:'r'}],
+    ['l',{type:'local-candidate',candidateType:'host',address:''}],
+    ['r',{type:'remote-candidate',candidateType:'prflx',address:''}],
+  ]);
+  peer.pc.getStats=async()=>stats;
+  const channel=peer.channel;
+  channel.readyState='open';
+  channel.sent=[];
+  channel.send=data=>channel.sent.push(JSON.parse(data));
+  const openPromise=channel.onopen();
+  await Promise.resolve();
+  assert.equal(peer.verified,false);
+  assert.equal(channel.sent.length,0);
+  channel.onmessage({data:JSON.stringify({kind:'ready'})});
+  for(let n=0;n<5;n++) await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(peer.remoteReady,true);
+  assert.equal(peer.remoteHostPairVerified,false);
+  assert.equal(peer.verified,false,'a legacy ready is not proof of host/host');
+  assert.equal(channel.sent.length,0);
+  channel.onmessage({data:JSON.stringify({kind:'ready',hostHostVerified:true})});
+  for(let n=0;n<10 && !peer.ready;n++) await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(peer.remoteHostPairVerified,true);
+  assert.equal(peer.verified,true);
+  assert.equal(peer.localReadySent,true);
+  assert.equal(peer.ready,true);
+  assert.equal(peer.routeInfo.code,'masked-host-prflx-reciprocal-p2p');
+  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].remoteHostPairVerified'),true);
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,true);
+  stats.get('r').candidateType='relay';
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,false);
+  stats.get('r').candidateType='prflx';
+  stats.get('r').address='8.8.8.8';
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,false);
+  for(const [id,entry] of [...t.timers]) if(entry.ms===600){t.timers.delete(id);entry.cb();}
+  await openPromise;
+});
+
 test('file-time path rechecks still reject switched-to-relay or public prflx paths', async () => {
   const t=harness({realRoutePolicy:true});
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
