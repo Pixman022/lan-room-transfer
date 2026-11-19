@@ -418,6 +418,42 @@ test('ordinary copy diagnostics does not expose SDP, room token or ICE addresses
   assert.ok(!serialized.includes('192.168.9.3'));
 });
 
+test('ordinary ICE diagnosis identifies suspected mDNS failure without exposing private data', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("phone","Phone",true,"gen-phone")');
+  const peer=t.state.peers.get('phone');
+  peer.acceptedCandidates=1;
+  peer.remoteCandidateCount=1;
+  peer.pc.iceConnectionState='failed';
+  peer.pc.localDescription={
+    type:'offer',sdp:'v=0\r\na=candidate:1 1 udp 123 local-secret.local 5222 typ host\r\n'
+  };
+  peer.pc.remoteDescription={
+    type:'answer',sdp:'v=0\r\na=candidate:2 1 udp 123 remote-secret.local 6000 typ host\r\nc=IN IP4 10.1.2.3\r\n'
+  };
+  peer.pc.getStats=async()=>new Map([
+    ['local',{type:'local-candidate',id:'local',candidateType:'host',address:'192.168.9.3'}],
+    ['transport',{type:'transport',id:'transport'}],
+  ]);
+  const report=await t.run('buildDiagnosticsReport()');
+  const diagnosis=report.peers[0].iceDiagnosis;
+  assert.equal(diagnosis.code,'mdns-resolution-or-candidate-pair-suspected');
+  assert.equal(diagnosis.remoteMdnsLines,1);
+  assert.equal(diagnosis.candidatesAcceptedByApi,1);
+  assert.equal(diagnosis.candidatePairsReported,0);
+  const serialized=JSON.stringify(report);
+  for(const sensitive of ['5832','local-token','Amber Fox','192.168.9.3','10.1.2.3','remote-secret.local','local-secret.local']) {
+    assert.ok(!serialized.includes(sensitive), 'redacted report leaked: '+sensitive);
+  }
+
+  peer.pc.getStats=async()=>{throw Error('browser denied stats at 192.168.9.3');};
+  const unavailable=await t.run('buildDiagnosticsReport()');
+  assert.equal(unavailable.peers[0].iceDiagnosis.code,'stats-unavailable');
+  assert.ok(!JSON.stringify(unavailable).includes('192.168.9.3'));
+});
+
 test('rejected remote ICE candidate is counted and propagated', async () => {
   const t=harness({debug:true});
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
