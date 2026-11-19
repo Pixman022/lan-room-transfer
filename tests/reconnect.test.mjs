@@ -284,7 +284,7 @@ test('three peers: concurrent independent receivers and a second uploader never 
   assert.equal(clients.C.savedBlobs.length,3);
   assert.equal(await realSha256Hex(clients.A.savedBlobs[0]),await realSha256Hex(filesB.get('b1')));
   assert.equal(await realSha256Hex(clients.B.savedBlobs[0]),await realSha256Hex(filesA.get('a1')));
-  for(const [index,blob] of filesA.values().entries()){
+  for(const [index,blob] of Array.from(filesA.values()).entries()){
     assert.equal(await realSha256Hex(clients.C.savedBlobs[index]),await realSha256Hex(blob));
   }
   assert.equal(clients.C.state.queue.length,0);
