@@ -530,6 +530,40 @@ async function flushCandidates(peer) {
   }
 }
 
+function inspectPeerPath(peer) {
+  return inspectSelectedPath(peer.pc, {
+    remoteReady: peer.remoteReady,
+    channelOpen: peer.channel?.readyState === 'open',
+  });
+}
+async function verifyPeerPath(peer) {
+  let verdict;
+  try { verdict = await inspectPeerPath(peer); }
+  catch (err) { verdict = { allowed: false, reason: `路径检查失败：${err.message}` }; }
+  if (state.peers.get(peer.id) !== peer || peer.channel?.readyState !== 'open') return false;
+  if (peer.verified) return true;
+  tracePeer(peer, 'webrtc.route.verdict', { verdict });
+  peer.reason = verdict.reason;
+  peer.routeInfo = {
+    code: verdict.code ?? 'stats-error',
+    localAddressKind: verdict.localAddressKind ?? 'unavailable',
+    remoteAddressKind: verdict.remoteAddressKind ?? 'unavailable',
+    localCandidateType: verdict.localCandidateType ?? 'unavailable',
+    remoteCandidateType: verdict.remoteCandidateType ?? 'unavailable',
+  };
+  if (verdict.allowed) {
+    peer.verified = true;
+    tracePeer(peer, 'datachannel.send.ready');
+    peer.channel.send(JSON.stringify({ kind: 'ready' }));
+    peer.localReadySent = true;
+    peer.ready = peer.remoteReady;
+    peer.reason = peer.ready ? '文件直连就绪' : '文件通道已打开，等待对端完成安全路径验证';
+    if (peer.ready) clearTimeout(peer.connectTimer);
+    syncSharedOffers(peer);
+  }
+  renderPeers();
+  return peer.verified;
+}
 function attachChannel(peer, channel) {
   peer.channel = channel;
   channel.binaryType = 'arraybuffer';
@@ -556,34 +590,10 @@ function attachChannel(peer, channel) {
     if (state.peers.get(peer.id) !== peer) return;
     for (let count = 0; count < 20 && channel.readyState === 'open' &&
          state.peers.get(peer.id) === peer; count += 1) {
-      let verdict;
-      try { verdict = await inspectSelectedPath(peer.pc); }
-      catch (err) { verdict = { allowed: false, reason: `路径检查失败：${err.message}` }; }
-      tracePeer(peer, 'webrtc.route.verdict', { verdict });
-      peer.reason = verdict.reason;
-      peer.routeInfo = {
-        code: verdict.code ?? 'stats-error',
-        localAddressKind: verdict.localAddressKind ?? 'unavailable',
-        remoteAddressKind: verdict.remoteAddressKind ?? 'unavailable',
-        localCandidateType: verdict.localCandidateType ?? 'unavailable',
-        remoteCandidateType: verdict.remoteCandidateType ?? 'unavailable',
-      };
-      if (verdict.allowed) {
-        peer.verified = true;
-        tracePeer(peer, 'datachannel.send.ready');
-        channel.send(JSON.stringify({ kind: 'ready' }));
-        peer.localReadySent = true;
-        peer.ready = peer.remoteReady;
-        peer.reason = peer.ready ? '文件直连就绪' : '文件通道已打开，等待对端完成安全路径验证';
-        if (peer.ready) clearTimeout(peer.connectTimer);
-        syncSharedOffers(peer);
-        renderPeers();
-        return;
-      }
-      renderPeers();
+      if (await verifyPeerPath(peer)) return;
       await new Promise(resolve => setTimeout(resolve, 600));
     }
-    if (state.peers.get(peer.id) !== peer) return;
+    if (state.peers.get(peer.id) !== peer || peer.verified) return;
     peer.reason = `拒绝传输：${peer.reason}`;
     peer.ready = false;
     renderPeers();
@@ -605,6 +615,11 @@ async function receiveChannel(peer, data) {
     tracePeer(peer, 'datachannel.ready.received', {
       localReadySent: peer.localReadySent, localRouteVerified: peer.verified,
     });
+    // A host/prflx exception requires this peer's ready. Re-check immediately
+    // even if the regular onopen polling window has already elapsed.
+    if (!peer.verified && peer.channel?.readyState === 'open') {
+      void verifyPeerPath(peer);
+    }
     if (peer.ready) {
       peer.reason = '文件直连就绪';
       clearTimeout(peer.connectTimer);
@@ -687,13 +702,13 @@ async function startSendingFile(peer, request) {
   const token = { cancelled: false, cancel() { this.cancelled = true; } };
   peer.sending.set(request.fileId, token);
   try {
-    const path = await inspectSelectedPath(peer.pc);
+    const path = await inspectPeerPath(peer);
     if (!path.allowed) throw new Error(path.reason);
     if (!sendPeer(peer, { kind: 'file-start', offerId: request.offerId, fileId: request.fileId, size: file.size })) throw new Error('设备连接断开');
     for (let offset = 0, block = 0; offset < file.size; offset += CHUNK_SIZE, block += 1) {
       if (token.cancelled) break;
       if (block % 16 === 0) {
-        const fresh = await inspectSelectedPath(peer.pc);
+        const fresh = await inspectPeerPath(peer);
         if (!fresh.allowed) throw new Error('传输途中路径检查失败，已停止');
       }
       const chunk = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
