@@ -337,7 +337,7 @@ function dropPeer(id, generation) {
   return true;
 }
 // Keep only bounded, redacted per-attempt outcomes. Browser IPs, SDP,
- // credentials and file metadata must never enter ordinary diagnostics.
+// credentials and file metadata must never enter ordinary diagnostics.
 function iceAttemptSnapshot(peer, outcome) {
   return {
     attempt: peer.attempt,
