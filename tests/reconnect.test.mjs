@@ -325,7 +325,10 @@ test('mid-transfer prflx recovery requests fresh host/host proof and resumes onl
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathProofRequestsSent'),1);
   assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.pathProofRepliesReceived'),0);
   routeTimer(t);
-  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存');
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存' ||
+    t.receiver.state.jobs[0].status.startsWith('失败'));
+  assert.equal(t.receiver.state.jobs[0].status,'校验通过，点击保存',
+    JSON.stringify(t.sender.run('diagnosticsSnapshot().peers[0].transfer')));
   assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(original));
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksRecovered'),1);
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.lastPathRecheckCode'),'prflx-unverified');
