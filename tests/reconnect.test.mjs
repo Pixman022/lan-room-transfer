@@ -102,6 +102,12 @@ function harness({debug = false} = {}) {
     WebSocket: FakeWebSocket,
     RTCPeerConnection: FakeRTCPeerConnection,
     isHostCandidateLine,
+    inspectSelectedPath: async () => ({
+      allowed: true, code: 'masked-host-p2p',
+      reason: '已建立 host P2P 连接', localAddressKind: 'hidden',
+      remoteAddressKind: 'private-ipv4',
+      localCandidateType: 'host', remoteCandidateType: 'host',
+    }),
     setTimeout: (cb, ms) => { const id = ++nextTimer; timers.set(id, {cb, ms}); return id; },
     clearTimeout: id => timers.delete(id),
     queueMicrotask,
@@ -491,4 +497,72 @@ test('connected ICE is reported as connected even when stats omit candidate pair
   const h=harness();
   const d=h.run('diagnoseIce({pc:{iceConnectionState:"connected",localDescription:null,remoteDescription:null}}, [])');
   assert.equal(d.code,'ice-connected');
+});
+
+test('connected DataChannel without reciprocal ready reports pending handshake, never renegotiates ICE', async () => {
+  const t=harness({debug:true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const ws=t.FakeWebSocket.sockets[0];
+  await join(t,ws);
+  await t.run('createPeer("phone","Phone",false,"gen-phone")');
+  const peer=t.state.peers.get('phone');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  const channel={
+    label:'room-files',ordered:true,readyState:'open',sent:[],
+    send(data){this.sent.push(JSON.parse(data));},
+  };
+  peer.pc.ondatachannel({channel});
+  await channel.onopen();
+  assert.equal(peer.verified,true);
+  assert.equal(peer.localReadySent,true);
+  assert.equal(peer.remoteReady,false);
+  assert.equal(peer.ready,false);
+  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.match(peer.reason,/等待对端/);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].localReadySent'),true);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].canTransfer'),false);
+
+  const oldCount=t.FakeRTCPeerConnection.instances.length;
+  const signalingSent=ws.sent.length;
+  fireNextTimer(t);
+  assert.match(peer.reason,/尚未收到对端/);
+  assert.equal(t.state.peers.get('phone'),peer);
+  assert.equal(t.FakeRTCPeerConnection.instances.length,oldCount);
+  assert.equal(ws.sent.length,signalingSent);
+  assert.ok(t.debugMessages.some(args=>String(args[0]).includes('datachannel.ready.timeout')));
+
+  const report=await t.run('buildDiagnosticsReport()');
+  assert.equal(report.detailedPeers[0].handshake.localPathVerified,true);
+  assert.equal(report.detailedPeers[0].handshake.localReadySent,true);
+  assert.equal(report.detailedPeers[0].handshake.remoteReadyReceived,false);
+
+  channel.onmessage({data:JSON.stringify({kind:'ready'})});
+  assert.equal(peer.remoteReady,true);
+  assert.equal(peer.ready,true);
+  assert.equal(peer.reason,'文件直连就绪');
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].canTransfer'),true);
+});
+
+test('early remote ready is accepted after local path verification and local ready send', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("phone","Phone",false,"gen-phone")');
+  const peer=t.state.peers.get('phone');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  const channel={
+    label:'room-files',ordered:true,readyState:'open',sent:[],
+    send(data){this.sent.push(JSON.parse(data));},
+  };
+  peer.pc.ondatachannel({channel});
+  channel.onmessage({data:JSON.stringify({kind:'ready'})});
+  assert.equal(peer.remoteReady,true);
+  assert.equal(peer.ready,false);
+  await channel.onopen();
+  assert.equal(peer.localReadySent,true);
+  assert.equal(peer.ready,true);
+  assert.equal(t.timers.size,0);
+  assert.deepEqual(channel.sent,[{kind:'ready'}]);
 });
