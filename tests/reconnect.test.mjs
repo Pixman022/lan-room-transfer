@@ -216,6 +216,84 @@ test('receive queue transfers multiple batches serially with real SHA-256, inclu
   assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.startsReceived'),3);
 });
 
+test('three peers: concurrent independent receivers and a second uploader never mix files', async () => {
+  const clients={};
+  for(const id of ['A','B','C']){
+    clients[id]=harness({realChecksum:true});
+    clients[id].run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+    await join(clients[id],clients[id].FakeWebSocket.sockets[0]);
+  }
+  async function link(leftId,rightId){
+    const left=clients[leftId],right=clients[rightId];
+    await left.run(`createPeer("${rightId}","${rightId}",true,"gen-${rightId}",3)`);
+    await right.run(`createPeer("${leftId}","${leftId}",false,"gen-${leftId}",3)`);
+    const l=left.state.peers.get(rightId),r=right.state.peers.get(leftId);
+    const receiverChannel={label:'room-files',ordered:true,readyState:'open',
+      bufferedAmount:0,send(){}};
+    r.pc.ondatachannel({channel:receiverChannel});
+    l.channel.readyState='open';l.channel.bufferedAmount=0;
+    for(const peer of [l,r]){
+      peer.ready=true;peer.verified=true;peer.remoteReady=true;
+      peer.pc.connectionState='connected';peer.pc.iceConnectionState='connected';
+    }
+    l.channel.send=data=>setImmediate(()=>receiverChannel.onmessage({data}));
+    receiverChannel.send=data=>setImmediate(()=>l.channel.onmessage({data}));
+  }
+  await link('A','B');
+  await link('A','C');
+  await link('B','C');
+
+  const filesA=new Map([
+    ['a1',new Blob([new Uint8Array(45001).fill(65)])],
+    ['a2',new Blob([])],
+    ['a3',new Blob(['only A offered this file'])],
+  ]);
+  const filesB=new Map([['b1',new Blob(['only B offered this file'])]]);
+  const publish=(client,id,files)=>{
+    client.state.outbound.set(id,files);
+    client.state.ownOffers.push({offerId:id,files:[...files].map(([fileId,blob])=>({
+      id:fileId,name:`${fileId}.txt`,size:blob.size,
+    }))});
+    client.run('for(const peer of state.peers.values()) syncSharedOffers(peer)');
+  };
+  publish(clients.A,'offer-a',filesA);
+  publish(clients.B,'offer-b',filesB);
+  await flushUntil(()=>clients.B.state.offers.has('A:offer-a') &&
+    clients.C.state.offers.has('A:offer-a') &&
+    clients.A.state.offers.has('B:offer-b') &&
+    clients.C.state.offers.has('B:offer-b'));
+  assert.equal(clients.C.state.offers.size,2,'C sees both independent uploaders');
+  assert.deepEqual(Array.from(clients.C.state.offers.get('A:offer-a').files,x=>x.id),
+    ['a1','a2','a3']);
+
+  // Same A file sent simultaneously to B and C; B uploads to A at the same
+  // time. Each receiver has its own active job and serial queue.
+  clients.C.run('for(const file of state.offers.get("A:offer-a").files) acceptFile(state.offers.get("A:offer-a"),file)');
+  clients.B.run('acceptFile(state.offers.get("A:offer-a"),state.offers.get("A:offer-a").files[0])');
+  clients.A.run('acceptFile(state.offers.get("B:offer-b"),state.offers.get("B:offer-b").files[0])');
+  assert.equal(clients.C.state.queue.length,2);
+  assert.equal(clients.B.state.queue.length,0);
+  assert.equal(clients.A.state.queue.length,0);
+  await flushUntil(()=>clients.C.state.jobs.length===3 &&
+    clients.C.state.jobs.every(x=>x.status==='校验通过，点击保存') &&
+    clients.B.state.jobs[0]?.status==='校验通过，点击保存' &&
+    clients.A.state.jobs[0]?.status==='校验通过，点击保存',5000);
+
+  assert.equal(clients.A.savedBlobs.length,1);
+  assert.equal(clients.B.savedBlobs.length,1);
+  assert.equal(clients.C.savedBlobs.length,3);
+  assert.equal(await realSha256Hex(clients.A.savedBlobs[0]),await realSha256Hex(filesB.get('b1')));
+  assert.equal(await realSha256Hex(clients.B.savedBlobs[0]),await realSha256Hex(filesA.get('a1')));
+  for(const [index,blob] of Array.from(filesA.values()).entries()){
+    assert.equal(await realSha256Hex(clients.C.savedBlobs[index]),await realSha256Hex(blob));
+  }
+  assert.equal(clients.C.state.queue.length,0);
+  for(const id of ['A','B','C'])assert.equal(clients[id].state.active,null);
+  assert.equal(clients.A.state.peers.get('B').transferEvents['request-file:received'],1);
+  assert.equal(clients.A.state.peers.get('C').transferEvents['request-file:received'],3);
+  assert.equal(clients.B.state.peers.get('A').transferEvents['request-file:received'],1);
+});
+
 function goodPathStats(remoteType='host') {
   return new Map([
     ['transport',{type:'transport',selectedCandidatePairId:'pair'}],
