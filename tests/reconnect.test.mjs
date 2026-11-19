@@ -325,6 +325,11 @@ test('mid-transfer prflx recovery requests fresh host/host proof and resumes onl
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathProofRequestsSent'),1);
   assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.pathProofRepliesReceived'),0);
   routeTimer(t);
+  await flushUntil(()=>t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksRecovered')===1 ||
+    [...t.sender.timers.values()].some(timer=>timer.ms===250));
+  const check=t.sender.run('diagnosticsSnapshot().peers[0].transfer');
+  assert.equal(check.pathRechecksRecovered,1,
+    JSON.stringify({check,job:t.receiver.state.jobs[0].status,remoteHostPairVerified:t.a.remoteHostPairVerified}));
   await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存' ||
     t.receiver.state.jobs[0].status.startsWith('失败'));
   assert.equal(t.receiver.state.jobs[0].status,'校验通过，点击保存',
