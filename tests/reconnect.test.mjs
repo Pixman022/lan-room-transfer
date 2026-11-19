@@ -242,6 +242,71 @@ test('cancel active file waits for the sender acknowledgement before starting th
   assert.ok(controls.includes('file-canceled'));
 });
 
+test('cancel just before file-end does not strand the job and same-file retry succeeds', async () => {
+  const t=await linkedFilePeers();
+  let releaseSlice;
+  const content=new Blob(['hello']);
+  const slowFile={
+    size:5,
+    slice(){return {arrayBuffer:()=>new Promise(resolve=>{releaseSlice=resolve;})};},
+    arrayBuffer:()=>content.arrayBuffer(),
+  };
+  t.sender.state.outbound.set('offer-a',new Map([['f1',slowFile]]));
+  t.receiver.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',
+    files:[{id:'f1',name:'hello.txt',size:5,status:'pending'}]});
+  const originalSend=t.b.channel.send;
+  let lateCancel;
+  t.b.channel.send=data=>{
+    if(typeof data==='string' && JSON.parse(data).kind==='cancel-file'){
+      lateCancel=()=>originalSend(data);
+      return;
+    }
+    originalSend(data);
+  };
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[0])');
+  await flushUntil(()=>t.receiver.state.active?.status==='传输中' && releaseSlice);
+  t.receiver.run('cancelJob(state.active)');
+  assert.equal(t.receiver.state.jobs[0].status,'正在取消');
+  releaseSlice(new TextEncoder().encode('hello').buffer);
+  await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' && JSON.parse(x).kind==='file-end'));
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='已取消');
+  assert.ok(lateCancel,'cancel control was held to simulate the sender already finishing');
+  lateCancel();
+  await flushUntil(()=>t.sender.state.peers.get('receiver').sending.size===0);
+  t.sender.state.outbound.set('offer-a',new Map([['f1',content]]));
+  t.receiver.run('retryJob(state.jobs[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存');
+  assert.equal(await t.receiver.savedBlobs[0].text(),'hello');
+});
+
+test('late cancel acknowledgement must not cancel a new attempt for the same file', async () => {
+  const t=await linkedFilePeers();
+  const content=new Blob(['hello']);
+  t.sender.state.outbound.set('offer-a',new Map([['f1',content]]));
+  t.receiver.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',
+    files:[{id:'f1',name:'hello.txt',size:5,status:'pending'}]});
+  const job={peerId:'sender',offerId:'offer-a',fileId:'f1',name:'hello.txt',
+    size:5,received:0,chunks:[],status:'已取消',url:null,cancelled:true};
+  t.receiver.state.jobs.push(job);
+  t.receiver.run('retryJob(state.jobs[0])');
+  assert.equal(t.receiver.state.active,job);
+  assert.equal(job.cancelled,false);
+  t.b.channel.onmessage({data:JSON.stringify({kind:'file-canceled',fileId:'f1'})});
+  assert.equal(t.receiver.state.active,job,'stale ack must not finish a non-cancelled retry');
+  await flushUntil(()=>job.status==='校验通过，点击保存');
+});
+
+test('file-start arriving after cancellation cannot reactivate the cancelled job', async () => {
+  const t=await linkedFilePeers();
+  t.receiver.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',
+    files:[{id:'f1',name:'hello.txt',size:5,status:'pending'}]});
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[0])');
+  t.receiver.run('cancelJob(state.active)');
+  assert.equal(t.receiver.state.jobs[0].status,'正在取消');
+  t.b.channel.onmessage({data:JSON.stringify({kind:'file-start',offerId:'offer-a',fileId:'f1',size:5})});
+  assert.equal(t.receiver.state.jobs[0].status,'正在取消');
+});
+
 test('checksum failure quarantines corrupted bytes, then retry succeeds with original payload', async () => {
   let corruption=true;
   const t=await linkedFilePeers({tamperBinary:data=>corruption && data instanceof ArrayBuffer});
