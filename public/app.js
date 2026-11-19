@@ -804,6 +804,42 @@ function handleBinary(peer, data) {
   renderJobs();
 }
 
+// During a transfer, a browser can briefly omit its selected ICE pair from
+// getStats(). Pause all file bytes and re-check, but NEVER retry an explicit
+// unsafe-route verdict or use a previous approval as permission to continue.
+async function requireTransferPath(peer, token, phase) {
+  const transient = new Set(['pair-unavailable', 'stats-unavailable', 'stats-error']);
+  let code = 'stats-error';
+  for (let retry = 0; retry < 3; retry += 1) {
+    if (token.cancelled) return false;
+    if (!peer.ready || peer.channel?.readyState !== 'open' ||
+        peer.pc.connectionState !== 'connected' ||
+        !['connected', 'completed'].includes(peer.pc.iceConnectionState)) {
+      throw new Error('设备直连状态已改变，已停止发送');
+    }
+    let verdict;
+    try { verdict = await inspectPeerPath(peer); }
+    catch { verdict = { allowed: false, code: 'stats-error' }; }
+    if (token.cancelled) return false;
+    if (!peer.ready || peer.channel?.readyState !== 'open' ||
+        peer.pc.connectionState !== 'connected' ||
+        !['connected', 'completed'].includes(peer.pc.iceConnectionState)) {
+      throw new Error('设备直连状态已改变，已停止发送');
+    }
+    if (verdict.allowed) {
+      if (retry > 0) countTransfer(peer, 'route-check-recovered');
+      return true;
+    }
+    code = verdict.code || 'stats-error';
+    peer.lastRouteCheckCode = code;
+    if (!transient.has(code) || retry === 2) break;
+    countTransfer(peer, 'route-check-retried');
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  countTransfer(peer, 'route-check-failed');
+  throw new Error(`${phase}路径检查失败（${code}）`);
+}
+
 async function startSendingFile(peer, request) {
   const offer = state.outbound.get(request.offerId);
   const file = offer?.get(request.fileId);
@@ -829,15 +865,14 @@ async function startSendingFile(peer, request) {
     return;
   }
   try {
-    const path = await inspectPeerPath(peer);
-    if (!path.allowed) throw new Error(path.reason);
+    if (!await requireTransferPath(peer, token, '文件启动前')) {
+      sendPeer(peer, { kind: 'file-canceled', fileId: request.fileId });
+      return;
+    }
     if (!sendPeer(peer, { kind: 'file-start', offerId: request.offerId, fileId: request.fileId, size: file.size })) throw new Error('设备连接断开');
     for (let offset = 0, block = 0; offset < file.size; offset += CHUNK_SIZE, block += 1) {
       if (token.cancelled) break;
-      if (block % 16 === 0) {
-        const fresh = await inspectPeerPath(peer);
-        if (!fresh.allowed) throw new Error('传输途中路径检查失败，已停止');
-      }
+      if (block % 16 === 0 && !await requireTransferPath(peer, token, '传输途中')) break;
       const chunk = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
       while (peer.channel.bufferedAmount > 512 * 1024 && !token.cancelled) {
         if (peer.channel.readyState !== 'open') throw new Error('连接断开');
@@ -1083,6 +1118,10 @@ function diagnosticsSnapshot() {
         cancelsReceived: peer.transferEvents?.['cancel-file:received'] || 0,
         cancelAcksSent: peer.transferEvents?.['file-canceled:sent'] || 0,
         cancelAcksReceived: peer.transferEvents?.['file-canceled:received'] || 0,
+        pathRechecksRetried: peer.transferEvents?.['route-check-retried'] || 0,
+        pathRechecksRecovered: peer.transferEvents?.['route-check-recovered'] || 0,
+        pathRechecksFailed: peer.transferEvents?.['route-check-failed'] || 0,
+        lastPathRecheckCode: peer.lastRouteCheckCode || null,
         ignoredStarts: peer.transferEvents?.['start-ignored-mismatch'] || 0,
         ignoredErrors: peer.transferEvents?.['error-ignored-mismatch'] || 0,
         lastEvent: peer.lastTransferEvent || 'none',
