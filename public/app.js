@@ -884,6 +884,56 @@ function diagnosticsSnapshot() {
     })),
   };
 }
+// Diagnostic evidence only: a successful addIceCandidate() can still leave ICE
+// without a usable or browser-reported candidate pair, especially with mDNS.
+function diagnoseIce(peer, stats) {
+  const remoteLines = (peer.pc.remoteDescription?.sdp || '').split(/\r?\n/)
+    .filter(line => line.startsWith('a=candidate:'));
+  const localLines = (peer.pc.localDescription?.sdp || '').split(/\r?\n/)
+    .filter(line => line.startsWith('a=candidate:'));
+  const mdns = lines => lines.filter(line => /\.local(?=\s|$)/i.test(line)).length;
+  const pairs = stats.filter(item => item.type === 'candidate-pair');
+  const remoteStats = stats.filter(item => item.type === 'remote-candidate');
+  const counts = pairs.reduce((total, pair) => {
+    for (const key of ['requestsSent', 'requestsReceived', 'responsesSent', 'responsesReceived']) {
+      if (typeof pair[key] === 'number') total[key] += pair[key];
+    }
+    return total;
+  }, { requestsSent: 0, requestsReceived: 0, responsesSent: 0, responsesReceived: 0 });
+  const iceState = peer.pc.iceConnectionState;
+  let code = 'insufficient-evidence';
+  let interpretation = 'ICE 统计不足，需结合另一端的相同轮次诊断';
+  if (iceState === 'connected' || iceState === 'completed') {
+    code = 'ice-connected';
+    interpretation = 'ICE 已建立连接，下一步检查路径验证与 DataChannel';
+  } else if (pairs.length > 0 && counts.requestsSent > 0 && counts.responsesReceived === 0) {
+    code = 'checks-without-response';
+    interpretation = '浏览器报告已经发送 ICE 检查，但未报告收到响应；检查网络隔离、UDP 或对端状态';
+  } else if (pairs.length === 0 && (peer.acceptedCandidates || 0) > 0 &&
+             remoteStats.length === 0 && mdns(remoteLines) > 0) {
+    code = 'mdns-resolution-or-candidate-pair-suspected';
+    interpretation = '已接收 .local 主机候选，但浏览器未报告远端候选或候选连接对；优先排查 mDNS 解析及网络接口策略（不能据此断定解析失败）';
+  } else if (pairs.length === 0 && (peer.remoteCandidateCount || 0) > 0) {
+    code = 'no-candidate-pair-reported';
+    interpretation = '已收到 ICE 候选，但浏览器未报告连接对；不代表绝对没有执行 ICE 检查';
+  } else if (pairs.length > 0) {
+    code = 'candidate-pair-reported';
+    interpretation = '浏览器报告了候选连接对；根据状态和检查计数继续判断';
+  }
+  return {
+    code, interpretation, iceState,
+    localCandidateLines: localLines.length,
+    remoteCandidateLines: remoteLines.length,
+    localMdnsLines: mdns(localLines),
+    remoteMdnsLines: mdns(remoteLines),
+    candidatesAcceptedByApi: peer.acceptedCandidates || 0,
+    candidatesRejectedByApi: peer.rejectedCandidates || 0,
+    remoteCandidateStatsReported: remoteStats.length,
+    candidatePairsReported: pairs.length,
+    reportedCheckCounters: counts,
+    caveat: '浏览器可能隐藏 ICE 地址或省略统计；addIceCandidate 成功不保证地址已解析或网络可达。',
+  };
+}
 // Full evidence is intentionally opt-in. Normal copy diagnostics remain redacted.
 async function buildDiagnosticsReport() {
   const summary = diagnosticsSnapshot();
@@ -922,6 +972,7 @@ async function buildDiagnosticsReport() {
         transports: candidates('transport'),
       },
       statsError,
+      iceDiagnosis: diagnoseIce(peer, stats),
       stats,
     };
   }));
