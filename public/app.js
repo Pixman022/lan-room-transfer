@@ -366,7 +366,7 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   if (previous) dropPeer(id, previous.generation);
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
-    pc, channel: null, verified: false, remoteReady: false, localReadySent: false,
+    pc, channel: null, verified: false, remoteReady: false, remoteHostPairVerified: false, localReadySent: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
@@ -533,6 +533,7 @@ async function flushCandidates(peer) {
 function inspectPeerPath(peer) {
   return inspectSelectedPath(peer.pc, {
     remoteReady: peer.remoteReady,
+    remoteHostPairVerified: peer.remoteHostPairVerified,
     channelOpen: peer.channel?.readyState === 'open',
   });
 }
@@ -554,7 +555,10 @@ async function verifyPeerPath(peer) {
   if (verdict.allowed) {
     peer.verified = true;
     tracePeer(peer, 'datachannel.send.ready');
-    peer.channel.send(JSON.stringify({ kind: 'ready' }));
+    // The limited masked host/prflx exception requires a verified host/host
+    // declaration; legacy ready packets never qualify for that exception.
+    peer.channel.send(JSON.stringify(verdict.hostHostVerified
+      ? { kind: 'ready', hostHostVerified: true } : { kind: 'ready' }));
     peer.localReadySent = true;
     peer.ready = peer.remoteReady;
     peer.reason = peer.ready ? '文件直连就绪' : '文件通道已打开，等待对端完成安全路径验证';
@@ -611,9 +615,11 @@ async function receiveChannel(peer, data) {
   tracePeer(peer, 'datachannel.receive', { message: msg });
   if (msg.kind === 'ready') {
     peer.remoteReady = true;
+    peer.remoteHostPairVerified = msg.hostHostVerified === true;
     peer.ready = peer.verified;
     tracePeer(peer, 'datachannel.ready.received', {
       localReadySent: peer.localReadySent, localRouteVerified: peer.verified,
+      remoteHostPairVerified: peer.remoteHostPairVerified,
     });
     // A host/prflx exception requires this peer's ready. Re-check immediately
     // even if the regular onopen polling window has already elapsed.
@@ -903,6 +909,7 @@ function diagnosticsSnapshot() {
       routeVerified: Boolean(peer.verified),
       localReadySent: Boolean(peer.localReadySent),
       peerVerified: Boolean(peer.remoteReady),
+      remoteHostPairVerified: Boolean(peer.remoteHostPairVerified),
       route: peer.routeInfo,
       stage: peer.stage || 'unknown',
       attempt: peer.attempt,
@@ -1011,7 +1018,8 @@ async function buildDiagnosticsReport() {
       initiator: peer.initiator, attempt: peer.attempt, stage: peer.stage,
       handshake: {
         localPathVerified: peer.verified, localReadySent: peer.localReadySent,
-        remoteReadyReceived: peer.remoteReady, transferReady: peer.ready,
+        remoteReadyReceived: peer.remoteReady,
+        remoteHostPairVerified: peer.remoteHostPairVerified, transferReady: peer.ready,
       },
       localDescription: peer.pc.localDescription?.toJSON?.() ?? peer.pc.localDescription ?? null,
       remoteDescription: peer.pc.remoteDescription?.toJSON?.() ?? peer.pc.remoteDescription ?? null,
