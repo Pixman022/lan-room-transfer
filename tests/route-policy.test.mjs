@@ -140,6 +140,76 @@ test('selected host/prflx requires succeeded nominated ICE, open channel, connec
   assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
 });
 
+test('masked host/prflx requires verified reciprocal host/host and keeps unsafe paths rejected', async () => {
+  const stats = new Map([
+    ['t',{type:'transport',selectedCandidatePairId:'p'}],
+    ['p',{type:'candidate-pair',state:'succeeded',nominated:true,localCandidateId:'l',remoteCandidateId:'r'}],
+    ['l',{type:'local-candidate',candidateType:'host',address:''}],
+    ['r',{type:'remote-candidate',candidateType:'prflx',address:''}],
+  ]);
+  const pc = {getStats:async()=>stats,connectionState:'connected',iceConnectionState:'connected'};
+  const ready = {channelOpen:true,remoteReady:true,remoteHostPairVerified:true};
+
+  assert.equal((await inspectSelectedPath(pc, ready)).code,'masked-host-prflx-reciprocal-p2p');
+  assert.equal((await inspectSelectedPath(pc, {...ready,remoteHostPairVerified:false})).allowed,false);
+  assert.equal((await inspectSelectedPath(pc, {...ready,remoteReady:false})).allowed,false);
+  assert.equal((await inspectSelectedPath(pc, {...ready,channelOpen:false})).allowed,false);
+  assert.equal((await inspectSelectedPath(pc, {channelOpen:true,remoteReady:true})).allowed,false);
+  pc.connectionState='disconnected';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  pc.connectionState='connected';
+  pc.iceConnectionState='checking';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  pc.iceConnectionState='connected';
+  stats.get('p').nominated=false;
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('p').nominated=true;
+  stats.get('p').state='in-progress';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('p').state='succeeded';
+  for (const candidateType of ['relay','srflx','host']) {
+    stats.get('r').candidateType=candidateType;
+    assert.equal((await inspectSelectedPath(pc, ready)).allowed,candidateType==='host');
+  }
+  stats.get('r').candidateType='prflx';
+  for(const unsafe of ['8.8.8.8','2001:db8::1','100.64.0.5']) {
+    stats.get('r').address=unsafe;
+    assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  }
+  stats.get('r').address='192.168.31.40';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false,'masked host plus visible prflx must remain denied');
+  stats.get('r').address='';
+  stats.get('l').address='203.0.113.5';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('l').address='pc.local';
+  assert.equal((await inspectSelectedPath(pc, ready)).code,'masked-host-prflx-reciprocal-p2p');
+});
+
+test('host/host ready attestation requires connected selected succeeded ICE pair', async () => {
+  const stats = new Map([
+    ['t',{type:'transport',selectedCandidatePairId:'p'}],
+    ['p',{type:'candidate-pair',state:'succeeded',nominated:true,localCandidateId:'l',remoteCandidateId:'r'}],
+    ['l',{type:'local-candidate',candidateType:'host',address:'pc.local'}],
+    ['r',{type:'remote-candidate',candidateType:'host',address:'phone.local'}],
+  ]);
+  const pc={getStats:async()=>stats,connectionState:'connected',iceConnectionState:'connected'};
+  const ok=await inspectSelectedPath(pc,{channelOpen:true});
+  assert.equal(ok.allowed,true);
+  assert.equal(ok.hostHostVerified,true);
+  assert.equal((await inspectSelectedPath(pc,{channelOpen:false})).hostHostVerified,false);
+  pc.connectionState='disconnected';
+  assert.equal((await inspectSelectedPath(pc,{channelOpen:true})).hostHostVerified,false);
+  pc.connectionState='connected';
+  stats.get('p').state='in-progress';
+  assert.equal((await inspectSelectedPath(pc,{channelOpen:true})).hostHostVerified,false);
+  stats.get('p').state='succeeded';
+  stats.get('r').candidateType='prflx';
+  assert.equal((await inspectSelectedPath(pc,{channelOpen:true})).hostHostVerified,false);
+  stats.get('r').candidateType='host';
+  stats.get('r').address='8.8.8.8';
+  assert.equal((await inspectSelectedPath(pc,{channelOpen:true})).hostHostVerified,false);
+});
+
 test('ordinary host/host approval is not made dependent on reciprocal ready', async () => {
   const stats = new Map([
     ['t', {type:'transport',selectedCandidatePairId:'p'}],
