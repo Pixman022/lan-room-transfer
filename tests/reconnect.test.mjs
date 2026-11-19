@@ -328,6 +328,58 @@ test('temporary room-entry rejection during recovery continues backoff', async (
   assert.equal([...t.timers.values()][0].ms,2000);
 });
 
+test('cumulative connection timing survives retries and freezes only when P2P is ready', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  const first=t.state.peers.get('other');
+  const initial=Date.now()-42000;
+  first.firstAttemptStartedAt=initial;
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].timeToReadySeconds'),null);
+
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  const second=t.state.peers.get('other');
+  assert.equal(second.attempt,2);
+  assert.equal(second.firstAttemptStartedAt,initial);
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  const reversed=t.state.peers.get('other');
+  assert.equal(reversed.attempt,3);
+  assert.equal(reversed.firstAttemptStartedAt,initial,'reversing offerer must not reset total setup time');
+
+  reversed.pc.connectionState='connected';
+  reversed.pc.iceConnectionState='connected';
+  const channel={
+    label:'room-files',ordered:true,readyState:'open',sent:[],
+    send(data){this.sent.push(JSON.parse(data));},
+  };
+  reversed.pc.ondatachannel({channel});
+  await channel.onopen();
+  assert.equal(reversed.verified,true);
+  assert.equal(reversed.readyAt,null,'a local ready without reciprocal ready is not complete');
+  channel.onmessage({data:JSON.stringify({kind:'ready'})});
+  assert.equal(reversed.ready,true);
+  assert.ok(reversed.readyAt>=initial);
+  const diagnostics=t.run('diagnosticsSnapshot().peers[0]');
+  assert.equal(diagnostics.attempt,3);
+  assert.ok(diagnostics.elapsedSeconds<15,'current attempt timer is short');
+  assert.ok(diagnostics.setupElapsedSeconds>=42,'total spans all three ICE attempts');
+  assert.equal(diagnostics.setupElapsedSeconds,diagnostics.timeToReadySeconds);
+  assert.equal(t.timers.size,0,'ready clears stale ICE retry timers');
+
+  // Rebuilding a previously ready peer is a fresh measurement, not a
+  // continuation of the previous connection's setup time.
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer",1,true)');
+  const fresh=t.state.peers.get('other');
+  assert.equal(fresh.readyAt,null);
+  assert.ok(fresh.firstAttemptStartedAt>initial);
+  const freshDiagnostics=t.run('diagnosticsSnapshot().peers[0]');
+  assert.equal(freshDiagnostics.timeToReadySeconds,null);
+  assert.ok(freshDiagnostics.setupElapsedSeconds<10);
+});
+
 test('two original-offerer failures reverse at attempt 3, with one final reversed retry', async () => {
   const t = harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
@@ -782,9 +834,11 @@ test('early remote ready is accepted after local path verification and local rea
   channel.onmessage({data:JSON.stringify({kind:'ready'})});
   assert.equal(peer.remoteReady,true);
   assert.equal(peer.ready,false);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].timeToReadySeconds'),null);
   await channel.onopen();
   assert.equal(peer.localReadySent,true);
   assert.equal(peer.ready,true);
+  assert.notEqual(t.run('diagnosticsSnapshot().peers[0].timeToReadySeconds'),null);
   assert.equal(t.timers.size,0);
   assert.deepEqual(channel.sent,[{kind:'ready'}]);
 });
