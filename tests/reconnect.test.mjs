@@ -213,14 +213,16 @@ test('receiver distinguishes sender acknowledgement from file-start timeout', as
   });
   t.run('acceptFile(state.offers.get("sender:offer-1"), state.offers.get("sender:offer-1").files[0])');
   assert.equal(t.state.active.status,'等待发送端');
-  assert.equal([...t.timers.values()][0].ms,20000);
+  assert.equal(t.timers.get(t.state.active.timer).ms,20000);
   assert.equal(sent[0].kind,'request-file');
 
   peer.channel.onmessage({data:JSON.stringify({kind:'file-request-ack',offerId:'offer-1',fileId:'file-1'})});
   assert.equal(t.state.active.status,'发送端已响应，等待文件启动');
-  assert.equal([...t.timers.values()][0].ms,20000);
+  assert.equal(t.timers.get(t.state.active.timer).ms,20000);
   assert.equal(t.run('diagnosticsSnapshot().peers[0].transfer.acksReceived'),1);
-  fireNextTimer(t);
+  const timer=t.timers.get(t.state.active.timer);
+  t.timers.delete(t.state.active.timer);
+  timer.cb();
   assert.match(t.state.jobs[0].status,/发送端已响应，但未开始发送/);
 });
 
