@@ -113,7 +113,11 @@ function harness({debug = false, realRoutePolicy = false} = {}) {
     queueMicrotask,
     fetch: async () => { throw Error('no test network'); },
     navigator: {userAgent: 'TestBrowser'}, crypto: {randomUUID: () => 'test-uuid'},
-    Blob, Map, Set, Date, Promise, console: testConsole,
+    Blob, ArrayBuffer, Map, Set, Date, Promise, console: testConsole,
+    URL: {createObjectURL: () => 'blob:test-file', revokeObjectURL() {}},
+    sha256Hex: async () => 'a'.repeat(64),
+    isSha256Hex: value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value),
+    verifySha256: async (blob, hash) => blob.size === 5 && hash === 'a'.repeat(64),
     DEVICE_NAME_KEY: 'device-key',
     getOrCreateDeviceName: () => 'Amber Fox',
     generateDeviceName: () => 'Amber Fox',
@@ -134,6 +138,110 @@ const fireNextTimer = t => {
   t.timers.delete(id);
   timer.cb();
 };
+
+test('file request acknowledges promptly then transfers a small file over the private channel', async () => {
+  const sender=harness();
+  const receiver=harness();
+  sender.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  receiver.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(sender,sender.FakeWebSocket.sockets[0]);
+  await join(receiver,receiver.FakeWebSocket.sockets[0]);
+
+  await sender.run('createPeer("receiver","Phone",true,"generation-r",4)');
+  await receiver.run('createPeer("sender","Desktop",false,"generation-s",4)');
+  const a=sender.state.peers.get('receiver');
+  const b=receiver.state.peers.get('sender');
+  const inbound={
+    label:'room-files',ordered:true,readyState:'open',bufferedAmount:0,send() {},
+  };
+  b.pc.ondatachannel({channel:inbound});
+  a.channel.readyState='open';
+  a.channel.bufferedAmount=0;
+  a.ready=true; b.ready=true;
+  a.verified=true; b.verified=true;
+  a.pc.connectionState='connected'; b.pc.connectionState='connected';
+  a.pc.iceConnectionState='connected'; b.pc.iceConnectionState='connected';
+  const fromSender=[],fromReceiver=[];
+  a.channel.send=data=>{
+    fromSender.push(data);
+    setImmediate(()=>inbound.onmessage({data}));
+  };
+  inbound.send=data=>{
+    fromReceiver.push(data);
+    setImmediate(()=>a.channel.onmessage({data}));
+  };
+  const file=new Blob(['hello'],{type:'text/plain'});
+  sender.state.outbound.set('offer-1',new Map([['file-1',file]]));
+  receiver.state.offers.set('sender:offer-1',{
+    peerId:'sender',offerId:'offer-1',
+    files:[{id:'file-1',name:'hello.txt',size:5,status:'pending'}],
+  });
+  receiver.run('acceptFile(state.offers.get("sender:offer-1"), state.offers.get("sender:offer-1").files[0])');
+  for(let i=0;i<15 && receiver.state.jobs[0].status!=='校验通过，点击保存';i++)
+    await new Promise(resolve=>setImmediate(resolve));
+
+  assert.equal(receiver.state.jobs[0].status,'校验通过，点击保存');
+  assert.equal(receiver.state.jobs[0].received,5);
+  assert.equal(receiver.state.jobs[0].url,'blob:test-file');
+  const sentKinds=fromSender.filter(x=>typeof x==='string').map(x=>JSON.parse(x).kind);
+  assert.deepEqual(sentKinds,['file-request-ack','file-start','file-end']);
+  assert.deepEqual(fromReceiver.filter(x=>typeof x==='string').map(x=>JSON.parse(x).kind),['request-file']);
+  const sendDiag=sender.run('diagnosticsSnapshot().peers[0].transfer');
+  const receiveDiag=receiver.run('diagnosticsSnapshot().peers[0].transfer');
+  assert.equal(sendDiag.requestsReceived,1);
+  assert.equal(sendDiag.acksSent,1);
+  assert.equal(sendDiag.startsSent,1);
+  assert.equal(receiveDiag.requestsSent,1);
+  assert.equal(receiveDiag.acksReceived,1);
+  assert.equal(receiveDiag.startsReceived,1);
+  assert.equal(receiveDiag.errorsReceived,0);
+  assert.ok(!JSON.stringify(receiveDiag).includes('hello.txt'),'ordinary counters never reveal filenames');
+});
+
+test('receiver distinguishes sender acknowledgement from file-start timeout', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("sender","Desktop",true,"gen-sender")');
+  const peer=t.state.peers.get('sender');
+  peer.ready=true; peer.channel.readyState='open';
+  const sent=[];
+  peer.channel.send=data=>sent.push(JSON.parse(data));
+  t.state.offers.set('sender:offer-1',{
+    peerId:'sender',offerId:'offer-1',
+    files:[{id:'file-1',name:'hello.txt',size:5,status:'pending'}],
+  });
+  t.run('acceptFile(state.offers.get("sender:offer-1"), state.offers.get("sender:offer-1").files[0])');
+  assert.equal(t.state.active.status,'等待发送端');
+  assert.equal(t.timers.get(t.state.active.timer).ms,20000);
+  assert.equal(sent[0].kind,'request-file');
+
+  peer.channel.onmessage({data:JSON.stringify({kind:'file-request-ack',offerId:'offer-1',fileId:'file-1'})});
+  assert.equal(t.state.active.status,'发送端已响应，等待文件启动');
+  assert.equal(t.timers.get(t.state.active.timer).ms,20000);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].transfer.acksReceived'),1);
+  const timer=t.timers.get(t.state.active.timer);
+  t.timers.delete(t.state.active.timer);
+  timer.cb();
+  assert.match(t.state.jobs[0].status,/发送端已响应，但未开始发送/);
+});
+
+test('failed control-channel send returns an immediate failure instead of waiting for a timeout', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("sender","Desktop",true,"gen-sender")');
+  const peer=t.state.peers.get('sender');
+  peer.ready=true; peer.channel.readyState='open';
+  peer.channel.send=()=>{throw new Error('transport send failure');};
+  t.state.offers.set('sender:offer-1',{
+    peerId:'sender',offerId:'offer-1',
+    files:[{id:'file-1',name:'hello.txt',size:5,status:'pending'}],
+  });
+  t.run('acceptFile(state.offers.get("sender:offer-1"), state.offers.get("sender:offer-1").files[0])');
+  assert.match(t.state.jobs[0].status,/文件请求发送失败/);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].transfer.sendErrors'),1);
+});
 
 test('unexpected disconnect re-enters same room with identity and staged files', async () => {
   const t = harness();
