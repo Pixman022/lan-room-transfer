@@ -964,9 +964,22 @@ $('toggle-diagnostics').addEventListener('click', () => {
   renderDiagnostics();
 });
 $('copy-diagnostics').addEventListener('click', async () => {
-  const report = JSON.stringify(await buildDiagnosticsReport(), null, 2);
+  const report = JSON.stringify(FULL_DEBUG ? await buildDiagnosticsReport() : diagnosticsSnapshot(), null, 2);
   try { await navigator.clipboard.writeText(report); feedback('诊断已复制'); }
-  catch { feedback('复制未成功，请截图诊断区域', true); }
+  catch {
+    if (!FULL_DEBUG) { feedback('复制未成功，请截图诊断区域', true); return; }
+    // Mobile browsers may reject clipboard writes after asynchronous getStats().
+    // Offer the same full evidence as a local JSON download instead.
+    try {
+      const url = URL.createObjectURL(new Blob([report], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'lan-room-ice-debug.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      feedback('复制受限，已尝试下载完整诊断 JSON');
+    } catch { feedback('无法复制或下载，请使用浏览器控制台', true); }
+  }
 });
 function renderSentFiles() {
   const container = $('sent-files');
