@@ -705,7 +705,10 @@ async function receiveChannel(peer, data) {
     peer.sending.get(msg.fileId)?.cancel();
   } else if (msg.kind === 'file-start') {
     const job = state.active;
-    if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId || job.offerId !== msg.offerId || msg.size !== job.size) return;
+    if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId || job.offerId !== msg.offerId || msg.size !== job.size) {
+      countTransfer(peer, 'start-ignored-mismatch');
+      return;
+    }
     job.status = '传输中'; job.received = 0; job.chunks = [];
     armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时'); renderJobs();
   } else if (msg.kind === 'file-end') {
@@ -733,6 +736,7 @@ async function receiveChannel(peer, data) {
     if (state.active?.peerId === peer.id && state.active?.fileId === msg.fileId) finishJob('已取消');
   } else if (msg.kind === 'file-error') {
     if (state.active?.peerId === peer.id && state.active?.fileId === msg.fileId) failActive(msg.message || '发送方读取失败');
+    else countTransfer(peer, 'error-ignored-mismatch');
   }
 }
 function handleBinary(peer, data) {
@@ -997,8 +1001,14 @@ function diagnosticsSnapshot() {
         duplicateRequests: peer.transferEvents?.['duplicate-request-ignored'] || 0,
         sourceUnavailable: peer.transferEvents?.['source-unavailable'] || 0,
         senderFailures: peer.transferEvents?.['sender-failed'] || 0,
+        ignoredStarts: peer.transferEvents?.['start-ignored-mismatch'] || 0,
+        ignoredErrors: peer.transferEvents?.['error-ignored-mismatch'] || 0,
         lastEvent: peer.lastTransferEvent || 'none',
-        activeReceiveStatus: state.active?.peerId === peer.id ? state.active.status : null,
+        activeReceiveStage: state.active?.peerId !== peer.id ? null
+          : state.active.status === '等待发送端' ? 'awaiting-response'
+          : state.active.status === '发送端已响应，等待文件启动' ? 'awaiting-file-start'
+          : state.active.status === '传输中' ? 'receiving'
+          : 'other',
       },
       // Do not copy room codes, member names, IP addresses or file names.
       reason: String(peer.reason ?? '').replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]').slice(0, 180),
