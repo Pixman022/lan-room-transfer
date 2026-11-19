@@ -21,6 +21,10 @@ Trace entries have a `[LAN Room debug +…ms]` prefix and contain these full, **
 - DataChannel control messages and original shared file names and metadata.
 - Timing of socket close/reconnect, peer replacement and ICE retry attempts.
 
+**New ICE classification:** Each `detailedPeers[].iceDiagnosis` in full-debug JSON contains an interpretation code, observed `.local` host candidate counts, reported ICE candidate-pair counts and connectivity check counters. `mdns-resolution-or-candidate-pair-suspected` means that an mDNS candidate was accepted by the API but the browser did not expose a resolved remote candidate or a connection pair. It is a **suspicion**, not proof that mDNS resolution failed. `checks-without-response` only appears when the browser actually exposes response counters and recorded outgoing checks without replies. Normal (non-debug) diagnostics are unchanged.
+
+**Controlled compatibility test:** Keep PC Chrome and the same Wi-Fi/router; first try the phone with Chrome, then its previous Firefox browser. If only Firefox fails, capture full-debug JSON from *both* browser/device pairs. If both fail, prioritize mDNS/multicast client isolation, guest networks, VPN and PC firewall/network profile checks. Do not add STUN/TURN or disable browser privacy protections as a hidden fallback.
+
 **Browser limitation:** WebRTC stats are browser-dependent. A missing `candidate-pair` or counter does not prove there was no connectivity check. mDNS address obfuscation or IP redaction can prevent JavaScript, even in full debug mode, from seeing the real LAN IP. The logs contain everything available through WebRTC APIs, but cannot bypass browser privacy enforcement.
 
 **Security:** Full debug prints room credentials, WebRTC ICE credentials, IP addresses and filenames to the local browser console. It does not send debug logs to LAN Room's cloud service. Do not post a raw console export to public issue trackers or share it with strangers. A debug URL does **not** include credentials in its query string, and reopening the ordinary URL disables tracing.
