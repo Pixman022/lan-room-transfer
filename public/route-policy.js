@@ -43,7 +43,7 @@ function result(allowed, code, reason, local, remote) {
   };
 }
 
-export function assessPair(local, remote, { allowPeerReflexive = false } = {}) {
+export function assessPair(local, remote, { allowPeerReflexive = false, remoteHostPairVerified = false } = {}) {
   if (!local || !remote)
     return result(false, 'stats-unavailable', '浏览器没有提供完整的候选统计信息，无法验证局域网路径', local, remote);
   const hostPair = local.candidateType === 'host' && remote.candidateType === 'host';
@@ -78,8 +78,12 @@ export function assessPair(local, remote, { allowPeerReflexive = false } = {}) {
         '已建立私有 IPv4 host P2P 连接（不保证流量仅经过局域网）', local, remote);
   }
   if (reflexivePair) {
-    // If one address is hidden, require the *host* endpoint to expose an
-    // RFC1918 IPv4 address. An unknown/hidden local endpoint is not enough.
+    // A fully masked pair requires a route-verified host/host declaration from
+    // the remote endpoint in addition to the local ICE/DTLS/channel checks.
+    if (obscured(localKind) && obscured(remoteKind) && remoteHostPairVerified)
+      return result(true, 'masked-host-prflx-reciprocal-p2p',
+        '对端确认 host/host 直连；双方地址被隐藏，无法保证仅经过物理局域网', local, remote);
+    // Otherwise the host endpoint must expose a private IPv4 address.
     if (localKind !== 'private-ipv4' || !obscured(remoteKind))
       return result(false, 'prflx-unverified', '无法确认反射候选对应的私有 IPv4 直连路径', local, remote);
     return result(true, 'masked-host-prflx-p2p',
@@ -90,14 +94,17 @@ export function assessPair(local, remote, { allowPeerReflexive = false } = {}) {
     '已建立 host P2P 连接；浏览器隐藏地址，不能保证只经过局域网', local, remote);
 }
 
-export async function inspectSelectedPath(pc, { remoteReady = false, channelOpen = false } = {}) {
+export async function inspectSelectedPath(pc, {
+  remoteReady = false, remoteHostPairVerified = false, channelOpen = false,
+} = {}) {
   const report = await pc.getStats();
   const entries = [...report.values()];
   let pair;
+  let selectedByTransport = false;
   for (const stat of entries) {
     if (stat.type === 'transport' && stat.selectedCandidatePairId) {
       pair = report.get(stat.selectedCandidatePairId);
-      if (pair) break;
+      if (pair) { selectedByTransport = true; break; }
     }
   }
   if (!pair) pair = entries.find(s => s.type === 'candidate-pair' && s.selected === true && s.state === 'succeeded');
@@ -111,5 +118,16 @@ export async function inspectSelectedPath(pc, { remoteReady = false, channelOpen
     pc.connectionState === 'connected' &&
     ['connected', 'completed'].includes(pc.iceConnectionState) &&
     channelOpen && remoteReady;
-  return assessPair(local, remote, { allowPeerReflexive: verifiedReflexive });
+  const verdict = assessPair(local, remote, {
+    allowPeerReflexive: verifiedReflexive,
+    remoteHostPairVerified: verifiedReflexive && remoteHostPairVerified,
+  });
+  // Only issue a host/host attestation if the browser reports the selected
+  // successful pair and an established transport. Never send candidate IPs.
+  const hostHostVerified = verdict.allowed &&
+    local?.candidateType === 'host' && remote?.candidateType === 'host' &&
+    pair.state === 'succeeded' && (pair.nominated === true || selectedByTransport) &&
+    pc.connectionState === 'connected' &&
+    ['connected', 'completed'].includes(pc.iceConnectionState) && channelOpen;
+  return { ...verdict, hostHostVerified };
 }
