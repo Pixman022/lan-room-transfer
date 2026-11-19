@@ -143,8 +143,8 @@ const fireNextTimer = t => {
 
 // Link two VM peers through an ordered fake DataChannel. No network, but the
 // actual application controller and WebCrypto checksum code run unmodified.
-async function linkedFilePeers({tamperBinary = () => false} = {}) {
-  const sender=harness({realChecksum:true});
+async function linkedFilePeers({tamperBinary = () => false, realRoutePolicy = false} = {}) {
+  const sender=harness({realChecksum:true,realRoutePolicy});
   const receiver=harness({realChecksum:true});
   for (const t of [sender,receiver]) {
     t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
@@ -213,6 +213,87 @@ test('receive queue transfers multiple batches serially with real SHA-256, inclu
   const starts=t.senderMessages.filter(x=>typeof x==='string' && JSON.parse(x).kind==='file-start').map(x=>JSON.parse(x));
   assert.deepEqual(starts.map(x=>x.fileId),['f1','f2','f3']);
   assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.startsReceived'),3);
+});
+
+function goodPathStats(remoteType='host') {
+  return new Map([
+    ['transport',{type:'transport',selectedCandidatePairId:'pair'}],
+    ['pair',{type:'candidate-pair',state:'succeeded',nominated:true,
+      localCandidateId:'local',remoteCandidateId:'remote'}],
+    ['local',{type:'local-candidate',candidateType:'host',address:'192.168.15.4'}],
+    ['remote',{type:'remote-candidate',candidateType:remoteType,address:'192.168.15.5'}],
+  ]);
+}
+function routeTimer(t) {
+  const found=[...t.sender.timers.entries()].find(([, timer])=>timer.ms===250);
+  assert.ok(found,'expected 250 ms fail-closed route recheck wait');
+  const [id, timer]=found;
+  t.sender.timers.delete(id);
+  timer.cb();
+}
+function offerLargeFile(t) {
+  const original=new Blob([new Uint8Array(16*16384+1024).fill(73)]);
+  t.sender.state.outbound.set('offer-route',new Map([['big',original]]));
+  t.receiver.state.offers.set('sender:offer-route',{
+    peerId:'sender',offerId:'offer-route',
+    files:[{id:'big',name:'big.bin',size:original.size,status:'pending'}],
+  });
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-route"),state.offers.get("sender:offer-route").files[0])');
+  return original;
+}
+
+test('a missing selected-pair getStats sample pauses file bytes, then recovers safely', async () => {
+  const t=await linkedFilePeers({realRoutePolicy:true});
+  let checks=0;
+  t.a.pc.getStats=async()=>++checks===3?new Map():goodPathStats();
+  const original=offerLargeFile(t);
+  await flushUntil(()=>[...t.sender.timers.values()].some(x=>x.ms===250));
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16,
+    'file bytes must pause at the failed checkpoint');
+  assert.equal(t.receiver.state.jobs[0].status,'传输中');
+  routeTimer(t);
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存');
+  assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(original));
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksRetried'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksRecovered'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksFailed'),0);
+});
+
+test('an unsafe selected candidate immediately stops transfer without retrying or sending more bytes', async () => {
+  const t=await linkedFilePeers({realRoutePolicy:true});
+  let checks=0;
+  t.a.pc.getStats=async()=>++checks===3?goodPathStats('relay'):goodPathStats();
+  offerLargeFile(t);
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('传输途中路径检查失败'));
+  assert.match(t.receiver.state.jobs[0].status,/non-host/);
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16,
+    'route denial must stop the remaining chunks');
+  assert.equal(t.sender.timers.size,1,'no route-check retry timer on unsafe candidate');
+  assert.equal(t.receiver.savedBlobs.length,0,'partial received file is never saved');
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksRetried'),0);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksFailed'),1);
+});
+
+test('persistent absent ICE statistics fail closed after only two paused rechecks', async () => {
+  const t=await linkedFilePeers({realRoutePolicy:true});
+  let checks=0;
+  t.a.pc.getStats=async()=>++checks>=3?new Map():goodPathStats();
+  offerLargeFile(t);
+  await flushUntil(()=>[...t.sender.timers.values()].some(x=>x.ms===250));
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16);
+  routeTimer(t);
+  await flushUntil(()=>[...t.sender.timers.values()].some(x=>x.ms===250));
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16);
+  routeTimer(t);
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('传输途中路径检查失败'));
+  assert.match(t.receiver.state.jobs[0].status,/pair-unavailable/);
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16);
+  assert.equal(t.receiver.savedBlobs.length,0);
+  const diag=t.sender.run('diagnosticsSnapshot().peers[0].transfer');
+  assert.equal(diag.pathRechecksRetried,2);
+  assert.equal(diag.pathRechecksRecovered,0);
+  assert.equal(diag.pathRechecksFailed,1);
+  assert.equal(diag.lastPathRecheckCode,'pair-unavailable');
 });
 
 test('cancel active file waits for the sender acknowledgement before starting the next queued file', async () => {
