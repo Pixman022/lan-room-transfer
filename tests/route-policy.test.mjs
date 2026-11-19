@@ -140,6 +140,50 @@ test('selected host/prflx requires succeeded nominated ICE, open channel, connec
   assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
 });
 
+test('selected pair proofs work without an omitted nomination flag but reject explicit false', async () => {
+  const stats = new Map([
+    ['transport', {type:'transport',selectedCandidatePairId:'pair'}],
+    ['pair', {type:'candidate-pair',state:'succeeded',localCandidateId:'a',remoteCandidateId:'b'}],
+    ['a', {type:'local-candidate',candidateType:'host',address:''}],
+    ['b', {type:'remote-candidate',candidateType:'prflx',address:''}],
+  ]);
+  const pc={getStats:async()=>stats,connectionState:'connected',iceConnectionState:'connected'};
+  const ready={remoteReady:true,remoteHostPairVerified:true,channelOpen:true};
+  const allowed=await inspectSelectedPath(pc,ready);
+  assert.equal(allowed.allowed,true,'the transport-selected pair compensates for an omitted nominated field');
+  assert.equal(allowed.code,'masked-host-prflx-reciprocal-p2p');
+  assert.equal(allowed.reflexiveEvidence.nominated,'missing');
+  assert.equal(allowed.reflexiveEvidence.selectedByTransport,true);
+  assert.ok(!JSON.stringify(allowed.reflexiveEvidence).includes('192.168.'));
+  assert.equal((await inspectSelectedPath(pc,{...ready,remoteHostPairVerified:false})).allowed,false);
+
+  stats.get('pair').nominated=false;
+  assert.equal((await inspectSelectedPath(pc,ready)).code,'prflx-unverified',
+    'explicitly un-nominated pair is not accepted even if transport-selected');
+  stats.get('pair').nominated=true;
+  assert.equal((await inspectSelectedPath(pc,ready)).allowed,true);
+
+  stats.get('pair').nominated=undefined;
+  stats.get('b').candidateType='relay';
+  assert.equal((await inspectSelectedPath(pc,ready)).allowed,false);
+  stats.get('b').candidateType='prflx';
+  stats.get('b').address='203.0.113.12';
+  assert.equal((await inspectSelectedPath(pc,ready)).allowed,false);
+  stats.get('b').address='';
+  stats.get('pair').state='in-progress';
+  assert.equal((await inspectSelectedPath(pc,ready)).allowed,false);
+  stats.get('pair').state='succeeded';
+
+  // Firefox may report the nonstandard selected flag instead of a transport ID.
+  stats.delete('transport');
+  stats.get('pair').selected=true;
+  assert.equal((await inspectSelectedPath(pc,ready)).allowed,true);
+  stats.get('b').candidateType='host';
+  assert.equal((await inspectSelectedPath(pc,{channelOpen:true})).hostHostVerified,true);
+  stats.get('pair').nominated=false;
+  assert.equal((await inspectSelectedPath(pc,{channelOpen:true})).hostHostVerified,false);
+});
+
 test('masked host/prflx requires verified reciprocal host/host and keeps unsafe paths rejected', async () => {
   const stats = new Map([
     ['t',{type:'transport',selectedCandidatePairId:'p'}],
