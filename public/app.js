@@ -973,7 +973,22 @@ function diagnoseIce(peer, stats) {
 // Full evidence is intentionally opt-in. Normal copy diagnostics remain redacted.
 async function buildDiagnosticsReport() {
   const summary = diagnosticsSnapshot();
-  if (!FULL_DEBUG) return summary;
+  if (!FULL_DEBUG) {
+    // Include ICE evidence without exposing raw SDP, IP addresses or room credentials.
+    const peers = await Promise.all([...state.peers.values()].map(async (peer, index) => {
+      let iceDiagnosis;
+      try {
+        iceDiagnosis = diagnoseIce(peer, [...(await peer.pc.getStats()).values()]);
+      } catch {
+        iceDiagnosis = {
+          code: 'stats-unavailable',
+          interpretation: '浏览器未返回 ICE 连接统计，需检查另一端设备',
+        };
+      }
+      return { ...summary.peers[index], iceDiagnosis };
+    }));
+    return { ...summary, peers };
+  }
   const detailedPeers = await Promise.all([...state.peers.values()].map(async (peer, index) => {
     let stats = [];
     let statsError = null;
@@ -1055,21 +1070,20 @@ $('toggle-diagnostics').addEventListener('click', () => {
   renderDiagnostics();
 });
 $('copy-diagnostics').addEventListener('click', async () => {
-  const report = JSON.stringify(FULL_DEBUG ? await buildDiagnosticsReport() : diagnosticsSnapshot(), null, 2);
+  const report = JSON.stringify(await buildDiagnosticsReport(), null, 2);
   try { await navigator.clipboard.writeText(report); feedback('诊断已复制'); }
   catch {
-    if (!FULL_DEBUG) { feedback('复制未成功，请截图诊断区域', true); return; }
-    // Mobile browsers may reject clipboard writes after asynchronous getStats().
-    // Offer the same full evidence as a local JSON download instead.
+    // Mobile Firefox may reject clipboard access. Both report modes can be
+    // downloaded locally without sending diagnostics through signaling.
     try {
       const url = URL.createObjectURL(new Blob([report], { type: 'application/json' }));
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'lan-room-ice-debug.json';
+      link.download = FULL_DEBUG ? 'lan-room-ice-debug.json' : 'lan-room-ice-diagnostics.json';
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      feedback('复制受限，已尝试下载完整诊断 JSON');
-    } catch { feedback('无法复制或下载，请使用浏览器控制台', true); }
+      feedback(FULL_DEBUG ? '复制受限，已尝试下载完整诊断 JSON' : '复制受限，已尝试下载脱敏诊断 JSON');
+    } catch { feedback('无法复制或下载，请截图诊断区域', true); }
   }
 });
 function renderSentFiles() {
