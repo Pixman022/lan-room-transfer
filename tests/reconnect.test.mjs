@@ -362,3 +362,70 @@ test('default mode does not log room credentials or raw SDP', async () => {
   await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
   assert.equal(t.debugMessages.length, 0);
 });
+
+test('debug copy report includes SDP, room credentials and live ICE pair check counters', async () => {
+  const t=harness({debug:true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const ws=t.FakeWebSocket.sockets[0];
+  await join(t,ws);
+  await t.run('createPeer("phone","Phone",true,"gen-phone")');
+  await t.run('handleSignal("phone","gen-phone",{type:"answer",attempt:1,sdp:"v=0\\r\\nc=IN IP4 10.12.34.56\\r\\n"})');
+  await t.run('handleSignal("phone","gen-phone",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.9.4 7777 typ host"}})');
+  const peer=t.state.peers.get('phone');
+  peer.pc.getStats=async()=>new Map([
+    ['local-a',{type:'local-candidate',id:'local-a',candidateType:'host',address:'192.168.9.3',port:7000}],
+    ['remote-a',{type:'remote-candidate',id:'remote-a',candidateType:'host',address:'192.168.9.4',port:7777}],
+    ['pair-a',{type:'candidate-pair',id:'pair-a',localCandidateId:'local-a',remoteCandidateId:'remote-a',state:'in-progress',requestsSent:3,requestsReceived:0,responsesSent:0,responsesReceived:0}],
+    ['transport-a',{type:'transport',id:'transport-a',selectedCandidatePairId:null}],
+  ]);
+  const report=await t.run('buildDiagnosticsReport()');
+  assert.equal(report.fullDebug,true);
+  assert.equal(report.room.code,'5832');
+  assert.equal(report.room.token,'local-token');
+  assert.equal(report.detailedPeers[0].acceptedCandidates,1);
+  assert.equal(report.detailedPeers[0].rejectedCandidates,0);
+  assert.equal(report.detailedPeers[0].iceSummary.candidatePairs[0].requestsSent,3);
+  assert.equal(report.detailedPeers[0].iceSummary.candidatePairs[0].responsesReceived,0);
+  assert.equal(report.detailedPeers[0].iceSummary.localCandidates[0].address,'192.168.9.3');
+  assert.equal(report.detailedPeers[0].iceSummary.remoteCandidates[0].address,'192.168.9.4');
+  assert.ok(JSON.stringify(report.events).includes('10.12.34.56'));
+  assert.ok(JSON.stringify(report).includes('candidate:1 1 udp 1 192.168.9.4'));
+});
+
+test('ordinary copy diagnostics does not expose SDP, room token or ICE addresses', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const ws=t.FakeWebSocket.sockets[0];
+  await join(t,ws);
+  await t.run('createPeer("phone","Phone",true,"gen-phone")');
+  const peer=t.state.peers.get('phone');
+  peer.pc.getStats=async()=>new Map([
+    ['local-a',{type:'local-candidate',id:'local-a',address:'192.168.9.3'}],
+  ]);
+  const report=await t.run('buildDiagnosticsReport()');
+  const serialized=JSON.stringify(report);
+  assert.equal(report.fullDebug,undefined);
+  assert.equal(report.detailedPeers,undefined);
+  assert.equal(report.events,undefined);
+  assert.ok(!serialized.includes('local-token'));
+  assert.ok(!serialized.includes('5832'));
+  assert.ok(!serialized.includes('192.168.9.3'));
+});
+
+test('rejected remote ICE candidate is counted and propagated', async () => {
+  const t=harness({debug:true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("phone","Phone",true,"gen-phone")');
+  const peer=t.state.peers.get('phone');
+  await t.run('handleSignal("phone","gen-phone",{type:"answer",attempt:1,sdp:"remote-answer"})');
+  peer.pc.addIceCandidate=async()=>{throw new Error('candidate was rejected');};
+  await assert.rejects(
+    t.run('handleSignal("phone","gen-phone",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.9.4 7777 typ host"}})'),
+    /candidate was rejected/
+  );
+  const report=await t.run('buildDiagnosticsReport()');
+  assert.equal(report.detailedPeers[0].acceptedCandidates,0);
+  assert.equal(report.detailedPeers[0].rejectedCandidates,1);
+  assert.ok(report.events.some(item=>item.event==='webrtc.addIceCandidate.failed'));
+});
