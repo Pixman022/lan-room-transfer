@@ -15,6 +15,7 @@ let reconnectAttempts = 0;
 const TRANSFER_IDLE_MS = 30000;
 const FULL_DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search || '');
 const debugStartedAt = Date.now();
+const debugEvents = [];
 const $ = id => document.getElementById(id);
 
 // Debug is deliberately explicit: logs contain room codes, credentials,
@@ -22,7 +23,10 @@ const $ = id => document.getElementById(id);
 // Data stays in this browser's DevTools; never relay logs to the server.
 function trace(event, data = {}) {
   if (!FULL_DEBUG) return;
-  console.log(`[LAN Room debug +${Date.now() - debugStartedAt}ms] ${event}`, data);
+  const elapsedMs = Date.now() - debugStartedAt;
+  debugEvents.push({ elapsedMs, event, data });
+  if (debugEvents.length > 300) debugEvents.shift();
+  console.log(`[LAN Room debug +${elapsedMs}ms] ${event}`, data);
 }
 function debugSend(ws, message) {
   trace('websocket.send', message);
@@ -354,7 +358,8 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     pc, channel: null, verified: false, remoteReady: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
-    localCandidates: [], candidateCount: 0, startedAt: Date.now(), connectTimer: null };
+    localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
+    startedAt: Date.now(), connectTimer: null };
   state.peers.set(id, peer);
   tracePeer(peer, 'peer.created', { force, previousAttempt: previous?.attempt });
   pc.onsignalingstatechange = () => tracePeer(peer, 'webrtc.signalingstatechange');
@@ -490,18 +495,27 @@ async function handleSignal(id, fromGeneration, signal) {
              (signal.candidate.candidate === '' || isHostCandidateLine(signal.candidate.candidate))) {
     if (signal.candidate.candidate !== '') peer.remoteCandidateCount = (peer.remoteCandidateCount || 0) + 1;
     if (peer.pc.remoteDescription) {
-      await peer.pc.addIceCandidate(signal.candidate);
-      tracePeer(peer, 'webrtc.addIceCandidate.done', { candidate: signal.candidate });
+      await addRemoteCandidate(peer, signal.candidate, 'webrtc.addIceCandidate.done');
     } else {
       tracePeer(peer, 'webrtc.addIceCandidate.queued', { candidate: signal.candidate });
       peer.candidates.push(signal.candidate);
     }
   }
 }
+async function addRemoteCandidate(peer, candidate, eventName) {
+  try {
+    await peer.pc.addIceCandidate(candidate);
+    if (candidate.candidate) peer.acceptedCandidates += 1;
+    tracePeer(peer, eventName, { candidate });
+  } catch (err) {
+    peer.rejectedCandidates += 1;
+    tracePeer(peer, 'webrtc.addIceCandidate.failed', { candidate, error: String(err) });
+    throw err;
+  }
+}
 async function flushCandidates(peer) {
   for (const candidate of peer.candidates.splice(0)) {
-    await peer.pc.addIceCandidate(candidate);
-    tracePeer(peer, 'webrtc.addIceCandidate.flushed', { candidate });
+    await addRemoteCandidate(peer, candidate, 'webrtc.addIceCandidate.flushed');
   }
 }
 
@@ -870,6 +884,57 @@ function diagnosticsSnapshot() {
     })),
   };
 }
+// Full evidence is intentionally opt-in. Normal copy diagnostics remain redacted.
+async function buildDiagnosticsReport() {
+  const summary = diagnosticsSnapshot();
+  if (!FULL_DEBUG) return summary;
+  const detailedPeers = await Promise.all([...state.peers.values()].map(async (peer, index) => {
+    let stats = [];
+    let statsError = null;
+    try {
+      const report = await peer.pc.getStats();
+      stats = [...report.values()].map(item => ({ ...item }));
+    } catch (error) {
+      statsError = String(error);
+    }
+    const candidates = type => stats.filter(item => item.type === type);
+    const pairs = candidates('candidate-pair').map(pair => ({
+      id: pair.id, state: pair.state, nominated: pair.nominated, selected: pair.selected,
+      localCandidateId: pair.localCandidateId, remoteCandidateId: pair.remoteCandidateId,
+      requestsSent: pair.requestsSent, requestsReceived: pair.requestsReceived,
+      responsesSent: pair.responsesSent, responsesReceived: pair.responsesReceived,
+      bytesSent: pair.bytesSent, bytesReceived: pair.bytesReceived,
+    }));
+    return {
+      device: index + 1, id: peer.id, name: peer.name, generation: peer.generation,
+      initiator: peer.initiator, attempt: peer.attempt, stage: peer.stage,
+      localDescription: peer.pc.localDescription?.toJSON?.() ?? peer.pc.localDescription ?? null,
+      remoteDescription: peer.pc.remoteDescription?.toJSON?.() ?? peer.pc.remoteDescription ?? null,
+      receivedCandidates: peer.remoteCandidateCount || 0,
+      acceptedCandidates: peer.acceptedCandidates || 0,
+      rejectedCandidates: peer.rejectedCandidates || 0,
+      queuedRemoteCandidates: peer.candidates,
+      pendingLocalCandidates: peer.localCandidates,
+      iceSummary: {
+        localCandidates: candidates('local-candidate'),
+        remoteCandidates: candidates('remote-candidate'),
+        candidatePairs: pairs,
+        transports: candidates('transport'),
+      },
+      statsError,
+      stats,
+    };
+  }));
+  return {
+    ...summary,
+    fullDebug: true,
+    capturedAt: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    room: { code: state.code, id: state.id, name: deviceName(), token: state.token, generation: state.generation },
+    detailedPeers,
+    events: debugEvents.slice(),
+  };
+}
 function renderDiagnostics() {
   const panel = $('diagnostics-panel');
   if (panel.hidden) return;
@@ -899,7 +964,7 @@ $('toggle-diagnostics').addEventListener('click', () => {
   renderDiagnostics();
 });
 $('copy-diagnostics').addEventListener('click', async () => {
-  const report = JSON.stringify(diagnosticsSnapshot(), null, 2);
+  const report = JSON.stringify(await buildDiagnosticsReport(), null, 2);
   try { await navigator.clipboard.writeText(report); feedback('诊断已复制'); }
   catch { feedback('复制未成功，请截图诊断区域', true); }
 });
