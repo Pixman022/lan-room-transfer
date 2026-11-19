@@ -4,13 +4,13 @@
 
 Real-device diagnostics confirmed an established WebRTC connection (`connection=connected`, `ice=connected`, `channel=open`) while the browser masked candidate addresses. The former strict private-IPv4 /24 rule incorrectly blocked this usable connection. The user explicitly approved **restricted B** on 2026-11-18.
 
-Current rule: `RTCPeerConnection({iceServers: []})`, transmit only `host` ICE candidates in signalling, require an explicitly selected `host`/`host` pair in `getStats()`, then:
-- Allow private IPv4 peers if two readable endpoints are different and in the same /24.
-- Allow a selected host pair when one/both addresses are mDNS-obfuscated, absent or redacted.
-- Reject any selected `relay`/`srflx` pair, visible public/unsupported addresses, visible IPv6, distinct visible private /24 subnets, identical readable endpoints, and missing selected-pair/type statistics.
-- Recheck the selected candidate pair periodically while sending file chunks. No TURN and no file data via the public signalling server.
+Current rule: `RTCPeerConnection({iceServers: []})`; transmit only `host` ICE candidates in signalling, then validate the explicitly selected ICE candidate pair with `getStats()`:
+- Preserve the existing `host/host` acceptance for different readable private IPv4 addresses in the same /24, or masked/mDNS host addresses.
+- **User-approved narrow exception (2026-11-19):** allow a selected `local host / remote prflx` pair only when the pair is `succeeded` and `nominated`, ICE and RTCPeerConnection are connected, DataChannel is open, and the other endpoint has already sent its own route-verified `ready`. The local host address must be visible private IPv4; remote `prflx` must be hidden/mDNS/redacted or a different visible private IPv4 in the same /24.
+- Reject `relay`/`srflx`, selected `local prflx`, visible public/unsupported addresses, visible IPv6, mismatched visible private /24 subnets, identical readable endpoints, incomplete selected-pair statistics, and a `host/prflx` pair without the above evidence.
+- Recheck the selected candidate pair when sending and periodically during file chunks using the **same approved policy**; fail closed if the route becomes disallowed. No TURN, no file data via the public signalling server.
 
-**This is not an authoritative LAN-only policy.** Host-only P2P can still traverse a VPN or routed network, including paths outside the physical LAN. Absence of an application-configured STUN/TURN server doesn't prove the network route; browser-hidden addresses prevent reliable classification. This is a deliberate compatibility/security trade-off rather than a verified LAN guarantee.
+**This is not an authoritative LAN-only policy.** Host P2P and peer-reflexive paths can traverse VPNs or routed networks, including paths outside the physical LAN. The other endpoint's `ready` message is a protocol confirmation, not independent proof of its physical network route or identity. Absence of an application-configured STUN/TURN server does not prove the route; browser-hidden addresses prevent reliable classification. This is an explicit compatibility/security trade-off rather than a verified LAN guarantee.
 
 Also, a room code is not authorization: room participants can view file metadata and initiate receiving any shared file. A four-digit code is easy to guess. Use non-sensitive test files until membership protection and real-device testing are completed.
 
