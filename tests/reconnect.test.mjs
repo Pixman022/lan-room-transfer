@@ -250,7 +250,8 @@ test('a missing selected-pair getStats sample pauses file bytes, then recovers s
   await flushUntil(()=>[...t.sender.timers.values()].some(x=>x.ms===250));
   assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16,
     'file bytes must pause at the failed checkpoint');
-  assert.equal(t.receiver.state.jobs[0].status,'传输中');
+  // The linked fake DataChannel delivers events on the next event-loop turn.
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='传输中');
   routeTimer(t);
   await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存');
   assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(original));
