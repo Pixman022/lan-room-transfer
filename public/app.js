@@ -906,7 +906,8 @@ function diagnoseIce(peer, stats) {
   if (iceState === 'connected' || iceState === 'completed') {
     code = 'ice-connected';
     interpretation = 'ICE 已建立连接，下一步检查路径验证与 DataChannel';
-  } else if (pairs.length > 0 && counts.requestsSent > 0 && counts.responsesReceived === 0) {
+  } else if (pairs.some(pair => typeof pair.responsesReceived === 'number') &&
+             counts.requestsSent > 0 && counts.responsesReceived === 0) {
     code = 'checks-without-response';
     interpretation = '浏览器报告已经发送 ICE 检查，但未报告收到响应；检查网络隔离、UDP 或对端状态';
   } else if (pairs.length === 0 && (peer.acceptedCandidates || 0) > 0 &&
