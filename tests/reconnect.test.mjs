@@ -380,6 +380,86 @@ test('cumulative connection timing survives retries and freezes only when P2P is
   assert.ok(freshDiagnostics.setupElapsedSeconds<10);
 });
 
+test('normal diagnostics retain all four bounded ICE attempts and final exhaustion', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+
+  const original=t.state.peers.get('other');
+  original.pc.iceConnectionState='failed';
+  original.pc.oniceconnectionstatechange();
+  assert.equal(t.timers.size,1);
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+
+  const second=t.state.peers.get('other');
+  assert.equal(second.attempt,2);
+  assert.equal(second.attemptHistory.length,1);
+  assert.equal(second.attemptHistory[0].retryTrigger,'ice-failed');
+  assert.equal(second.attemptHistory[0].role,'offerer');
+  assert.equal(second.attemptHistory[0].ice,'failed');
+
+  second.pc.iceConnectionState='checking';
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  const third=t.state.peers.get('other');
+  assert.equal(third.attempt,3);
+  assert.equal(third.attemptHistory.length,2);
+  assert.equal(third.attemptHistory[1].retryTrigger,'timeout');
+
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:3,sdp:"v=0\\r\\nc=IN IP4 192.168.9.2"})');
+  fireNextTimer(t);
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'retry',attempt:3});
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:4,sdp:"v=0\\r\\nc=IN IP4 192.168.9.3"})');
+  const fourth=t.state.peers.get('other');
+  assert.equal(fourth.attemptHistory.length,3);
+  assert.equal(fourth.attemptHistory[2].role,'answerer');
+  assert.equal(fourth.attempt,4);
+  fireNextTimer(t);
+
+  const diag=t.run('diagnosticsSnapshot().peers[0]');
+  assert.equal(diag.iceAttempts.length,4,'one entry per attempt; never unbounded');
+  assert.deepEqual(Array.from(diag.iceAttempts,x=>x.attempt),[1,2,3,4]);
+  assert.deepEqual(Array.from(diag.iceAttempts,x=>x.role),['offerer','offerer','answerer','answerer']);
+  assert.equal(diag.iceAttempts[3].outcome,'exhausted');
+  assert.equal(diag.iceAttempts[3].retryTrigger,'timeout');
+  assert.equal(diag.timeToReadySeconds,null);
+  assert.equal(diag.canTransfer,false);
+  assert.ok(diag.iceAttempts.every(x=>x.durationSeconds>=0 && typeof x.durationSeconds==='number'));
+  const raw=JSON.stringify(diag.iceAttempts);
+  assert.ok(!raw.includes('192.168.'),'redacted attempt history must not include IPs/SDP');
+  assert.ok(!raw.includes('5832'),'redacted attempt history must not include room codes');
+  assert.ok(!raw.includes('Sky Deer'),'redacted attempt history must not include device names');
+});
+
+test('successful reversed attempt is retained as ready without a false exhausted outcome', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  const reversed=t.state.peers.get('other');
+  reversed.pc.connectionState='connected';
+  reversed.pc.iceConnectionState='connected';
+  const channel={label:'room-files',ordered:true,readyState:'open',
+    send(){}};
+  reversed.pc.ondatachannel({channel});
+  await channel.onopen();
+  channel.onmessage({data:JSON.stringify({kind:'ready'})});
+  const diag=t.run('diagnosticsSnapshot().peers[0]');
+  assert.equal(diag.iceAttempts.length,3);
+  assert.equal(diag.iceAttempts[2].role,'answerer');
+  assert.equal(diag.iceAttempts[2].outcome,'ready');
+  assert.equal(diag.iceAttempts[2].ice,'connected');
+  assert.ok(diag.timeToReadySeconds!==null);
+  assert.equal(diag.canTransfer,true);
+});
+
 test('two original-offerer failures reverse at attempt 3, with one final reversed retry', async () => {
   const t = harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
