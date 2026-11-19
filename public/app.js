@@ -1177,7 +1177,7 @@ function renderDiagnostics() {
       root.append(elem('p', 'diagnostic-line', `路径：${peer.route.code}（本地 ${peer.route.localAddressKind} / 远端 ${peer.route.remoteAddressKind}）`));
     }
     root.append(elem('p', 'diagnostic-line',
-      `第 ${peer.attempt} 次协商 · 累计 ${peer.setupElapsedSeconds} 秒 · ${peer.timeToReadySeconds === null ? '仍在连接' : '直连就绪'}`));
+      `第 ${peer.attempt} 次协商 · 累计 ${peer.setupElapsedSeconds} 秒 · ${peer.timeToReadySeconds === null ? '尚未就绪' : `首次就绪耗时 ${peer.timeToReadySeconds} 秒`}`));
     root.append(elem('p', 'diagnostic-line',
       `文件请求 发/收 ${peer.transfer.requestsSent}/${peer.transfer.requestsReceived} · 确认 发/收 ${peer.transfer.acksSent}/${peer.transfer.acksReceived} · 启动 发/收 ${peer.transfer.startsSent}/${peer.transfer.startsReceived} · 最近 ${peer.transfer.lastEvent}`));
   }
