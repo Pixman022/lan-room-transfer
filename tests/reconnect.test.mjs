@@ -159,6 +159,7 @@ async function linkedFilePeers({tamperBinary = () => false, realRoutePolicy = fa
   a.channel.readyState='open';
   a.channel.bufferedAmount=0;
   a.ready=true; b.ready=true;
+  a.remoteReady=true; b.remoteReady=true;
   a.verified=true; b.verified=true;
   a.pc.connectionState='connected'; b.pc.connectionState='connected';
   a.pc.iceConnectionState='connected'; b.pc.iceConnectionState='connected';
