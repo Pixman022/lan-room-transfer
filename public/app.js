@@ -123,7 +123,7 @@ function sendSignal(to, signal) {
 // Privacy-reduced counters expose control-flow failures without file IDs,
 // names, room codes, candidate addresses or packet payloads.
 const TRANSFER_CONTROLS = new Set(['request-file', 'file-request-ack', 'file-start', 'file-end', 'file-error',
-  'cancel-file', 'file-canceled']);
+  'cancel-file', 'file-canceled', 'route-proof-request', 'route-proof']);
 function countTransfer(peer, event) {
   if (!peer) return;
   peer.transferEvents ??= {};
@@ -719,7 +719,20 @@ async function receiveChannel(peer, data) {
     if (TRANSFER_CONTROLS.has(msg.kind)) countTransfer(peer, 'control-ignored-unready');
     return;
   }
-  if (msg.kind === 'file-list') {
+  if (msg.kind === 'route-proof-request') {
+    // Re-attest only the CURRENT selected host/host pair. The peer's earlier
+    // ready message may predate ICE nomination; never echo cached approval.
+    let hostHostVerified = false;
+    try {
+      const verdict = await inspectPeerPath(peer);
+      hostHostVerified = verdict.allowed === true && verdict.hostHostVerified === true;
+    } catch { /* A missing or unsafe selected path cannot be attested. */ }
+    if (state.peers.get(peer.id) === peer && peer.ready) {
+      sendPeer(peer, { kind: 'route-proof', hostHostVerified });
+    }
+  } else if (msg.kind === 'route-proof') {
+    peer.remoteHostPairVerified = msg.hostHostVerified === true;
+  } else if (msg.kind === 'file-list') {
     if (typeof msg.offerId !== 'string' || !Array.isArray(msg.files) || msg.files.length > MAX_FILES ||
         msg.files.some(f => typeof f.id !== 'string' || typeof f.name !== 'string' ||
           f.name.length > 255 || !Number.isSafeInteger(f.size) || f.size < 0 || f.size > MAX_FILE_BYTES)) return;
@@ -809,7 +822,9 @@ function handleBinary(peer, data) {
 // unsafe-route verdict or use a previous approval as permission to continue.
 async function requireTransferPath(peer, token, phase) {
   const transient = new Set(['pair-unavailable', 'stats-unavailable', 'stats-error']);
+  const safeKinds = new Set(['mdns', 'hidden', 'redacted', 'private-ipv4']);
   let code = 'stats-error';
+  let proofRequested = false;
   for (let retry = 0; retry < 3; retry += 1) {
     if (token.cancelled) return false;
     if (!peer.ready || peer.channel?.readyState !== 'open' ||
@@ -832,7 +847,18 @@ async function requireTransferPath(peer, token, phase) {
     }
     code = verdict.code || 'stats-error';
     peer.lastRouteCheckCode = code;
-    if (!transient.has(code) || retry === 2) break;
+    peer.lastRouteCheckEvidence = verdict.reflexiveEvidence || null;
+    // A selected host/prflx pair may be temporarily unverified while browser
+    // stats settle or a reciprocal host/host attestation is being refreshed.
+    // Recheck with bytes PAUSED; never treat an unsafe or unverified verdict
+    // as permission to continue.
+    const evidence = verdict.reflexiveEvidence;
+    const safeReflexive = code === 'prflx-unverified' && evidence &&
+      safeKinds.has(evidence.localAddressKind) && safeKinds.has(evidence.remoteAddressKind);
+    if (safeReflexive && !proofRequested && !peer.remoteHostPairVerified) {
+      proofRequested = sendPeer(peer, { kind: 'route-proof-request' });
+    }
+    if ((!transient.has(code) && !safeReflexive) || retry === 2) break;
     countTransfer(peer, 'route-check-retried');
     await new Promise(resolve => setTimeout(resolve, 250));
   }
@@ -1122,6 +1148,9 @@ function diagnosticsSnapshot() {
         pathRechecksRecovered: peer.transferEvents?.['route-check-recovered'] || 0,
         pathRechecksFailed: peer.transferEvents?.['route-check-failed'] || 0,
         lastPathRecheckCode: peer.lastRouteCheckCode || null,
+        lastPathRecheckEvidence: peer.lastRouteCheckEvidence || null,
+        pathProofRequestsSent: peer.transferEvents?.['route-proof-request:sent'] || 0,
+        pathProofRepliesReceived: peer.transferEvents?.['route-proof:received'] || 0,
         ignoredStarts: peer.transferEvents?.['start-ignored-mismatch'] || 0,
         ignoredErrors: peer.transferEvents?.['error-ignored-mismatch'] || 0,
         lastEvent: peer.lastTransferEvent || 'none',

@@ -145,7 +145,7 @@ const fireNextTimer = t => {
 // actual application controller and WebCrypto checksum code run unmodified.
 async function linkedFilePeers({tamperBinary = () => false, realRoutePolicy = false} = {}) {
   const sender=harness({realChecksum:true,realRoutePolicy});
-  const receiver=harness({realChecksum:true});
+  const receiver=harness({realChecksum:true,realRoutePolicy});
   for (const t of [sender,receiver]) {
     t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
     await join(t,t.FakeWebSocket.sockets[0]);
@@ -159,6 +159,7 @@ async function linkedFilePeers({tamperBinary = () => false, realRoutePolicy = fa
   a.channel.readyState='open';
   a.channel.bufferedAmount=0;
   a.ready=true; b.ready=true;
+  a.remoteReady=true; b.remoteReady=true;
   a.verified=true; b.verified=true;
   a.pc.connectionState='connected'; b.pc.connectionState='connected';
   a.pc.iceConnectionState='connected'; b.pc.iceConnectionState='connected';
@@ -295,6 +296,79 @@ test('persistent absent ICE statistics fail closed after only two paused recheck
   assert.equal(diag.pathRechecksRecovered,0);
   assert.equal(diag.pathRechecksFailed,1);
   assert.equal(diag.lastPathRecheckCode,'pair-unavailable');
+});
+
+function maskedReflexivePathStats() {
+  const stats=goodPathStats('prflx');
+  stats.get('local').address='';
+  stats.get('remote').address='';
+  delete stats.get('pair').nominated;
+  return stats;
+}
+
+test('mid-transfer prflx recovery requests fresh host/host proof and resumes only after approval', async () => {
+  const t=await linkedFilePeers({realRoutePolicy:true});
+  let checks=0;
+  t.a.pc.getStats=async()=>++checks<=2?goodPathStats():maskedReflexivePathStats();
+  t.b.pc.getStats=async()=>{
+    const stats=goodPathStats();
+    stats.delete('transport');
+    stats.get('pair').selected=true;
+    delete stats.get('pair').nominated;
+    return stats;
+  };
+  const original=offerLargeFile(t);
+  await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='route-proof-request'));
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16,
+    'bytes must not continue over an unverified prflx path');
+  await flushUntil(()=>t.a.remoteHostPairVerified===true);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathProofRequestsSent'),1);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.pathProofRepliesReceived'),0);
+  routeTimer(t);
+  await flushUntil(()=>t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksRecovered')===1 ||
+    [...t.sender.timers.values()].some(timer=>timer.ms===250));
+  const check=t.sender.run('diagnosticsSnapshot().peers[0].transfer');
+  assert.equal(check.pathRechecksRecovered,1,
+    JSON.stringify({check,job:t.receiver.state.jobs[0].status,remoteHostPairVerified:t.a.remoteHostPairVerified}));
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存' ||
+    t.receiver.state.jobs[0].status.startsWith('失败'));
+  assert.equal(t.receiver.state.jobs[0].status,'校验通过，点击保存',
+    JSON.stringify(t.sender.run('diagnosticsSnapshot().peers[0].transfer')));
+  assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(original));
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.pathRechecksRecovered'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.lastPathRecheckCode'),'prflx-unverified');
+  const evidence=t.sender.run('diagnosticsSnapshot().peers[0].transfer.lastPathRecheckEvidence');
+  assert.equal(evidence.remoteHostPairVerified,false);
+  assert.equal(evidence.nominated,'missing');
+  assert.equal(evidence.selectedByTransport,true);
+  assert.ok(!JSON.stringify(evidence).includes('192.168.'),'normal diagnosis contains no network addresses');
+});
+
+test('if peer cannot attest host/host, prflx rechecks fail closed with no extra file bytes', async () => {
+  const t=await linkedFilePeers({realRoutePolicy:true});
+  let checks=0;
+  t.a.pc.getStats=async()=>++checks<=2?goodPathStats():maskedReflexivePathStats();
+  t.b.pc.getStats=async()=>maskedReflexivePathStats();
+  offerLargeFile(t);
+  await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='route-proof-request'));
+  await flushUntil(()=>t.receiverMessages.some(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='route-proof'));
+  assert.equal(t.a.remoteHostPairVerified,false);
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16);
+  routeTimer(t);
+  await flushUntil(()=>[...t.sender.timers.values()].some(x=>x.ms===250));
+  routeTimer(t);
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('传输途中路径检查失败'));
+  assert.match(t.receiver.state.jobs[0].status,/prflx-unverified/);
+  assert.equal(t.senderMessages.filter(x=>x instanceof ArrayBuffer).length,16);
+  assert.equal(t.receiver.savedBlobs.length,0);
+  const diag=t.sender.run('diagnosticsSnapshot().peers[0].transfer');
+  assert.equal(diag.pathRechecksRetried,2);
+  assert.equal(diag.pathRechecksFailed,1);
+  assert.equal(diag.pathProofRequestsSent,1);
+  assert.equal(diag.pathProofRepliesReceived,1);
 });
 
 test('cancel active file waits for the sender acknowledgement before starting the next queued file', async () => {
@@ -446,7 +520,7 @@ test('sender acknowledges cancellation even if its transfer already finished', a
   await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
     JSON.parse(x).kind==='file-canceled'));
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.cancelAcksSent'),1);
-  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.cancelAcksReceived'),1);
+  await flushUntil(()=>t.receiver.run('diagnosticsSnapshot().peers[0].transfer.cancelAcksReceived')===1);
 });
 
 test('a retry before the sender completes its previous file gets an explicit busy error', async () => {
