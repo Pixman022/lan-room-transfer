@@ -1,5 +1,29 @@
 # Technical risks and gaps (2026-11-18)
 
+## Active project backlog (reviewed 2026-11-19)
+
+The shipped site and repository are a **research POC**, not a production-ready or physically LAN-guaranteed file transfer product. Distinguish implemented-and-tested-in-unit-simulation from verified-on-real-devices. The user's current decision is to **defer further Chrome desktop ↔ Firefox mobile ICE reliability tuning**. Do not change the existing 2+2 negotiation policy as part of unrelated work.
+
+### Deferred: cross-browser ICE connection reliability
+
+**Tracked:** [GitHub issue #6](https://github.com/Pixman022/lan-room-transfer/issues/6) · **Status: deferred for later optimization**. On 2026-11-19 the user completed five single-click PC Chrome-created room → mobile Firefox join trials: automatic P2P-ready **4/5**, successful setup times **15, 35, 15, 34 s** (mean **24.75 s**, median **24.5 s**), **three** confirmed file receipts, a fourth unconfirmed, and one failed/manual-rejoin round. The failed round had no two-sided snapshot; do not assume mDNS, ICE candidate-pair resolution or timers are the root cause. Redacted per-attempt diagnostics are deployed. Future acceptance and investigation live in issue #6; no current-sprint modification is planned.
+
+### Next work (excluding deferred ICE tuning)
+
+| Priority | Remaining work | Actual baseline and acceptance |
+| --- | --- | --- |
+| P0 before public V1 | **File/receiver end-to-end QA**: same-file saved SHA-256 comparison on two real devices, both directions, Receive All sequential queue, cancellation/failed retry, source withdrawal, unexpected disconnect, 1 MiB and up-to-32 MiB memory checks | SHA-256 and queue logic exist; controller/unit/mock UI coverage passes, but these combinations and saved-file hash comparisons lack real-device validation |
+| P0 before public V1 | **Network/security boundary QA**: two separate Wi-Fi networks, VPN routes, guest/client-isolated Wi-Fi and dangerous ICE candidate paths; confirm file payloads never flow through cloud signaling | No configured STUN/TURN and host-only selection; restricted host/prflx exception is approved; physical LAN routing **cannot be guaranteed by the browser**, so V1 must not market absolute LAN-only transfer |
+| P0 before public V1 | **Real 3+ member and room lifecycle QA**: room creator departure, multi-uploader catalog, late joins, code reuse, 2-minute last-device offline window, rename and stale session takeover | Implemented/server or simulated UI tested; multi-device and sleep/refresh real-world regression coverage incomplete |
+| P1 | **Mobile/browser matrix**: Android Chrome, Firefox mobile, iOS Safari; download/save behavior, background/screen-lock, Wi-Fi handover and memory pressure | PC Chrome ↔ mobile Firefox has partial field success; Android Chrome and iOS Safari are explicitly untested |
+| P1 | **Privacy and abuse protection**: guessable 4-digit room codes, no local peer block/anti-spam controls, stronger public rate limiting and client/content privacy guidance | Joining by code without approval is intentional product behavior, but a short room code is not authentication; do not add mandatory approval or accounts without a product decision |
+| P1 for public release | **Operations/security hardening**: CSP and proxy/origin audit, server load/abuse tests, WebSocket resilience, sleep/restart behavior, in-memory room loss and multi-instance policy | Render single-instance POC is live; hosted free/in-memory behavior is not production-grade |
+| P2 optional UX | **QR room invite**, save-location selection where supported, clear browser permission/network failure messaging, durable Save-completion feedback | Not implemented or incomplete. Keep existing one-button create/join, room-wide share and per-device sequential receive behavior |
+| Later / separate scope | Streaming for larger files and restart/resume support | Current max **32 MiB per file** and whole-file buffering are explicit POC limits; do not promise 100 MiB–1 GiB, folder sync, cloud relay or persistent file history |
+
+**Recommended next milestone:** complete field-file/queue integrity checks, then multi-member/room life-cycle checks, then browser and network-safety matrix. Deferred ICE tuning stays visible in issue #6, but is not a prerequisite for implementing or testing independent functions. Public release readiness still requires a deliberate reliability decision.
+
+
 ## P0 — Restricted P2P mode (approved, 2026-11-18)
 
 Real-device diagnostics confirmed an established WebRTC connection (`connection=connected`, `ice=connected`, `channel=open`) while the browser masked candidate addresses. The former strict private-IPv4 /24 rule incorrectly blocked this usable connection. The user explicitly approved **restricted B** on 2026-11-18.
@@ -17,7 +41,7 @@ Current rule: `RTCPeerConnection({iceServers: []})`; transmit only `host` ICE ca
 
 Also, a room code is not authorization: room participants can view file metadata and initiate receiving any shared file. A four-digit code is easy to guess. Use non-sensitive test files until membership protection and real-device testing are completed.
 
-## P0 — Real-device connection reliability
+## P0 — Real-device transfer and network-safety validation (ICE tuning deferred)
 
 The user has since confirmed successful bidirectional file transfers between two real devices (2026-11-18). However, file sizes, saved-file hash comparison, multi-file queues and repeatability have not been established. Browser-side candidate stats are diagnostic hints, not proof of a physical LAN path. Test checksum-verified downloads on the newly deployed code, then test a VPN and two separate networks to measure connectivity and disclosure. Do not report strict LAN isolation as passed.
 
