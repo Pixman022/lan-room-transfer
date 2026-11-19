@@ -70,3 +70,85 @@ test('selected candidate stats must be readable and host/private', async () => {
   assert.equal(candidateAddressKind({address: 'fc00::5'}), 'ipv6');
   assert.equal((await inspectSelectedPath({getStats: async () => new Map()})).code, 'pair-unavailable');
 });
+
+test('host/prflx remains denied by default; narrow explicit exception preserves address safety', () => {
+  assert.equal(pair('192.168.31.125', null, 'host', 'prflx').allowed, false);
+  assert.equal(pair('192.168.31.125', null, 'host', 'prflx').code, 'prflx-unverified');
+  const eligible = { allowPeerReflexive: true };
+  const assess = (a, b, ta = 'host', tb = 'prflx') => assessPair(
+    {candidateType: ta, address: a}, {candidateType: tb, address: b}, eligible);
+  const masked = assess('192.168.31.125', '');
+  assert.equal(masked.allowed, true);
+  assert.equal(masked.code, 'masked-host-prflx-p2p');
+  assert.equal(masked.remoteCandidateType, 'prflx');
+  assert.equal(assess('192.168.31.125', 'phone.local').allowed, true);
+  assert.equal(assess('192.168.31.125', '0.0.0.0').allowed, true);
+  assert.equal(assess('192.168.31.125', '192.168.31.46').code, 'private-ipv4-host-prflx-pair');
+  assert.equal(assess('192.168.31.125', '192.168.30.46').code, 'subnet-mismatch');
+  assert.equal(assess('192.168.31.125', '192.168.31.125').code, 'same-address');
+  assert.equal(assess('192.168.31.125', '8.8.8.8').allowed, false);
+  assert.equal(assess('192.168.31.125', '2001:db8::1').allowed, false);
+  assert.equal(assess('', '').allowed, false, 'a masked local address is not enough to approve prflx');
+  assert.equal(assess('test.local', '192.168.31.46').allowed, false);
+  assert.equal(assess('8.8.8.8', '').allowed, false);
+  assert.equal(assess('192.168.31.125', '', 'host', 'srflx').allowed, false);
+  assert.equal(assess('192.168.31.125', '', 'host', 'relay').allowed, false);
+  assert.equal(assess('192.168.31.125', '', 'prflx', 'host').allowed, false);
+  assert.equal(assess('192.168.31.125', '', 'relay', 'host').allowed, false);
+});
+
+test('selected host/prflx requires succeeded nominated ICE, open channel, connected transport and remote ready', async () => {
+  const stats = new Map([
+    ['t', {type:'transport', selectedCandidatePairId:'p'}],
+    ['p', {type:'candidate-pair',state:'succeeded',nominated:true,localCandidateId:'a',remoteCandidateId:'b'}],
+    ['a', {type:'local-candidate',candidateType:'host',address:'192.168.31.125'}],
+    ['b', {type:'remote-candidate',candidateType:'prflx',address:''}],
+  ]);
+  const pc = {getStats:async()=>stats,connectionState:'connected',iceConnectionState:'connected'};
+  const ready = {channelOpen:true,remoteReady:true};
+  assert.equal((await inspectSelectedPath(pc, ready)).code, 'masked-host-prflx-p2p');
+  assert.equal((await inspectSelectedPath(pc, {channelOpen:true,remoteReady:false})).allowed, false);
+  assert.equal((await inspectSelectedPath(pc, {channelOpen:false,remoteReady:true})).allowed, false);
+  assert.equal((await inspectSelectedPath(pc)).allowed, false);
+  for (const connectionState of ['new','connecting','failed','disconnected']) {
+    pc.connectionState = connectionState;
+    assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  }
+  pc.connectionState = 'connected';
+  for (const iceConnectionState of ['new','checking','failed','disconnected']) {
+    pc.iceConnectionState = iceConnectionState;
+    assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  }
+  pc.iceConnectionState = 'completed';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,true);
+  pc.iceConnectionState = 'connected';
+  stats.get('p').nominated = false;
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('p').nominated = true;
+  stats.get('p').state = 'in-progress';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('p').state = 'succeeded';
+  stats.get('b').candidateType = 'relay';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('b').candidateType = 'srflx';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('b').candidateType = 'prflx';
+  stats.get('b').address = '203.0.113.2';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+  stats.get('b').address = '';
+  stats.get('a').address = '';
+  assert.equal((await inspectSelectedPath(pc, ready)).allowed,false);
+});
+
+test('ordinary host/host approval is not made dependent on reciprocal ready', async () => {
+  const stats = new Map([
+    ['t', {type:'transport',selectedCandidatePairId:'p'}],
+    ['p', {type:'candidate-pair',state:'succeeded',localCandidateId:'a',remoteCandidateId:'b'}],
+    ['a', {type:'local-candidate',candidateType:'host',address:'192.168.31.125'}],
+    ['b', {type:'remote-candidate',candidateType:'host',address:'192.168.31.46'}],
+  ]);
+  const pc = {getStats:async()=>stats,connectionState:'new',iceConnectionState:'new'};
+  const verdict = await inspectSelectedPath(pc);
+  assert.equal(verdict.allowed,true);
+  assert.equal(verdict.code,'private-ipv4-host-pair');
+});
