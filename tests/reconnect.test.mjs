@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
-import { isHostCandidateLine } from '../public/route-policy.js';
+import { isHostCandidateLine, inspectSelectedPath as inspectRealPath } from '../public/route-policy.js';
 
 const appSource = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
   .split('\n').filter(line => !line.startsWith('import ')).join('\n');
 
 // Exercise the real room controller against DOM/WebSocket stubs, without network access.
-function harness({debug = false} = {}) {
+function harness({debug = false, realRoutePolicy = false} = {}) {
   const debugMessages = [];
   const testConsole = {
     log: (...args) => debugMessages.push(args),
@@ -102,7 +102,7 @@ function harness({debug = false} = {}) {
     WebSocket: FakeWebSocket,
     RTCPeerConnection: FakeRTCPeerConnection,
     isHostCandidateLine,
-    inspectSelectedPath: async () => ({
+    inspectSelectedPath: realRoutePolicy ? inspectRealPath : async () => ({
       allowed: true, code: 'masked-host-p2p',
       reason: '已建立 host P2P 连接', localAddressKind: 'hidden',
       remoteAddressKind: 'private-ipv4',
@@ -565,4 +565,82 @@ test('early remote ready is accepted after local path verification and local rea
   assert.equal(peer.ready,true);
   assert.equal(t.timers.size,0);
   assert.deepEqual(channel.sent,[{kind:'ready'}]);
+});
+
+test('phone selected host/prflx is gated until PC ready then completes reciprocal handshake', async () => {
+  const t = harness({debug:true, realRoutePolicy:true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("pc","Desktop",true,"gen-pc")');
+  const peer=t.state.peers.get('pc');
+  const stats = new Map([
+    ['transport',{type:'transport',selectedCandidatePairId:'pair',iceState:'connected',dtlsState:'connected'}],
+    ['pair',{type:'candidate-pair',state:'succeeded',nominated:true,localCandidateId:'local',remoteCandidateId:'remote'}],
+    ['local',{type:'local-candidate',candidateType:'host',address:'192.168.31.125'}],
+    ['remote',{type:'remote-candidate',candidateType:'prflx',address:''}],
+  ]);
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  peer.pc.getStats=async()=>stats;
+  const channel=peer.channel;
+  channel.readyState='open';
+  channel.sent=[];
+  channel.send=data=>channel.sent.push(JSON.parse(data));
+
+  // App must not authorize the prflx exception before the other endpoint
+  // signals that it has verified its own path.
+  const pendingOpen=channel.onopen();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(peer.remoteReady,false);
+  assert.equal(peer.verified,false);
+  assert.equal(peer.localReadySent,false);
+  assert.equal(peer.ready,false);
+  assert.equal(channel.sent.length,0);
+
+  channel.onmessage({data:JSON.stringify({kind:'ready'})});
+  for (let n=0;n<8 && !peer.ready;n++) await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(peer.remoteReady,true);
+  assert.equal(peer.verified,true);
+  assert.equal(peer.localReadySent,true);
+  assert.equal(peer.ready,true);
+  assert.equal(peer.routeInfo.code,'masked-host-prflx-p2p');
+  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].canTransfer'),true);
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,true,
+    'transfer-time recheck must use same approved path policy');
+  const report=await t.run('buildDiagnosticsReport()');
+  assert.equal(report.detailedPeers[0].handshake.transferReady,true);
+  // Resolve any outstanding onopen async verification in the stub if present.
+  for(const [id,entry] of [...t.timers]) if(entry.ms===600){t.timers.delete(id); entry.cb();}
+  await pendingOpen;
+});
+
+test('file-time path rechecks still reject switched-to-relay or public prflx paths', async () => {
+  const t=harness({realRoutePolicy:true});
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("pc","Desktop",true,"gen-pc")');
+  const peer=t.state.peers.get('pc');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  peer.channel.readyState='open';
+  peer.remoteReady=true;
+  const stats = new Map([
+    ['t',{type:'transport',selectedCandidatePairId:'p'}],
+    ['p',{type:'candidate-pair',state:'succeeded',nominated:true,localCandidateId:'l',remoteCandidateId:'r'}],
+    ['l',{type:'local-candidate',candidateType:'host',address:'192.168.31.125'}],
+    ['r',{type:'remote-candidate',candidateType:'prflx',address:''}],
+  ]);
+  peer.pc.getStats=async()=>stats;
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,true);
+  stats.get('r').candidateType='relay';
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,false);
+  stats.get('r').candidateType='srflx';
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,false);
+  stats.get('r').candidateType='prflx';
+  stats.get('r').address='8.8.8.8';
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,false);
+  stats.get('r').address='192.168.32.5';
+  assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,false);
 });
