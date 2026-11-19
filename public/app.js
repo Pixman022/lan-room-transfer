@@ -8,7 +8,7 @@ const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
 const MAX_FILES = 20;
 const PEER_CONNECT_TIMEOUT_MS = 15000;
-const PEER_PRIMARY_ATTEMPTS = 3;
+const PEER_PRIMARY_ATTEMPTS = 2;
 const PEER_MAX_ATTEMPTS = 4;
 const RECONNECT_MAX_DELAY_MS = 15000;
 let reconnectTimer = null;
@@ -358,27 +358,30 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
       }
       return;
     }
-    if (peer.initiator && peer.attempt < PEER_PRIMARY_ATTEMPTS) {
+    if (peer.initiator && peer.attempt < PEER_MAX_ATTEMPTS &&
+        peer.attempt !== PEER_PRIMARY_ATTEMPTS) {
       tracePeer(peer, 'peer.renegotiate.initiator', { nextAttempt: peer.attempt + 1 });
       peer.reason = '正在重新协商直连';
       renderPeers();
       void createPeer(peer.id, peer.name, true, peer.generation, peer.attempt + 1, true)
         .catch(err => { recordSignalError(err.message); feedback('重新协商失败', true); });
     } else if (peer.initiator && peer.attempt === PEER_PRIMARY_ATTEMPTS) {
-      // Only after the regular attempts fail, ask the original answerer to
-      // offer once. This preserves successful first-join negotiations.
+      // After two normal attempts, let the original answerer offer.
+      // Keep two bounded attempts for each direction rather than waiting for
+      // three failures to try the path already seen working on real devices.
       tracePeer(peer, 'peer.renegotiate.reverse-role.request');
-      void createPeer(peer.id, peer.name, false, peer.generation, PEER_MAX_ATTEMPTS, true)
+      void createPeer(peer.id, peer.name, false, peer.generation, PEER_PRIMARY_ATTEMPTS + 1, true)
         .then(next => {
           if (!next || state.peers.get(peer.id) !== next) return;
           next.reason = '正在尝试由对端发起直连';
-          sendSignal(next.id, { type: 'retry', attempt: PEER_MAX_ATTEMPTS });
+          sendSignal(next.id, { type: 'retry', attempt: PEER_PRIMARY_ATTEMPTS + 1 });
           renderPeers();
         })
         .catch(err => { recordSignalError(err.message); feedback('反向协商失败', true); });
     } else if (!peer.initiator && peer.attempt > 0 &&
-               peer.attempt < PEER_PRIMARY_ATTEMPTS &&
-               peer.retryRequests < PEER_PRIMARY_ATTEMPTS - 1) {
+               peer.attempt < PEER_MAX_ATTEMPTS &&
+               peer.attempt !== PEER_PRIMARY_ATTEMPTS &&
+               peer.retryRequests < 1) {
       peer.retryRequests += 1;
       tracePeer(peer, 'peer.renegotiate.responder.request');
       peer.reason = '已请求对方重新协商';
@@ -498,15 +501,16 @@ async function handleSignal(id, fromGeneration, signal) {
     return;
   }
   if (signal.type === 'retry') {
-    if (!peer.initiator && !peer.ready && signal.attempt === PEER_MAX_ATTEMPTS &&
+    if (!peer.initiator && !peer.ready && signal.attempt === PEER_PRIMARY_ATTEMPTS + 1 &&
         peer.attempt === PEER_PRIMARY_ATTEMPTS &&
         !(peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected')) {
-      // Original answerer initiates the final attempt only on explicit request.
+      // Original answerer becomes offerer only on the explicit role-swap.
       tracePeer(peer, 'peer.renegotiate.reverse-role.accept');
-      await createPeer(id, peer.name, true, peer.generation, PEER_MAX_ATTEMPTS, true);
+      await createPeer(id, peer.name, true, peer.generation, PEER_PRIMARY_ATTEMPTS + 1, true);
     } else if (peer.initiator && !peer.ready && signal.attempt === peer.attempt &&
                !(peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected') &&
-               peer.attempt < PEER_PRIMARY_ATTEMPTS) {
+               peer.attempt < PEER_MAX_ATTEMPTS &&
+               peer.attempt !== PEER_PRIMARY_ATTEMPTS) {
       await createPeer(id, peer.name, true, peer.generation, peer.attempt + 1, true);
     }
     return;

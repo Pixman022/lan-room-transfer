@@ -328,57 +328,63 @@ test('temporary room-entry rejection during recovery continues backoff', async (
   assert.equal([...t.timers.values()][0].ms,2000);
 });
 
-test('initiator replaces stalled ICE attempts and ignores old answers and candidates', async () => {
+test('two original-offerer failures reverse at attempt 3, with one final reversed retry', async () => {
   const t = harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
   const socket = t.FakeWebSocket.sockets[0];
   await join(t, socket);
   await t.run('createPeer("other", "Sky Deer", true, "gen-peer")');
-  assert.equal(t.state.peers.get('other').attempt, 1);
-  assert.deepEqual(socket.sent.at(-1).signal, {type:'offer',attempt:1,sdp:'offer-sdp'});
-  assert.equal(t.FakeRTCPeerConnection.instances.length, 1);
-  assert.equal([...t.timers.values()][0].ms, 15000);
+  assert.equal(t.state.peers.get('other').attempt,1);
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'offer',attempt:1,sdp:'offer-sdp'});
+  assert.equal([...t.timers.values()][0].ms,15000);
 
   fireNextTimer(t);
   await new Promise(resolve => setImmediate(resolve));
   const peer2=t.state.peers.get('other');
-  assert.equal(peer2.attempt, 2);
-  assert.equal(t.FakeRTCPeerConnection.instances[0].connectionState, 'closed');
-  assert.equal(t.FakeRTCPeerConnection.instances.length, 2);
-  assert.equal(socket.sent.at(-1).signal.attempt, 2);
-
+  assert.equal(peer2.attempt,2);
+  assert.equal(peer2.initiator,true);
+  assert.equal(t.FakeRTCPeerConnection.instances[0].connectionState,'closed');
   await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:1,sdp:"stale"})');
   await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:1,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 7777 typ host"}})');
   assert.equal(peer2.pc.remoteDescription,null);
   assert.equal(peer2.pc.candidates.length,0);
   await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:2,sdp:"fresh"})');
-  assert.equal(peer2.pc.remoteDescription.sdp, 'fresh');
-  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.3 7778 typ host"}})');
-  assert.equal(peer2.pc.candidates.length,1);
-
+  assert.equal(peer2.pc.remoteDescription.sdp,'fresh');
+  // The old-style retry for attempt 2 must not create an incorrect offerer 3.
   await t.run('handleSignal("other","gen-peer",{type:"retry",attempt:2})');
-  assert.equal(t.state.peers.get('other').attempt,3);
-  assert.equal(socket.sent.at(-1).signal.attempt,3);
-  const peer3=t.state.peers.get('other');
-  fireNextTimer(t);
-  await new Promise(resolve => setImmediate(resolve));
-  const reversed=t.state.peers.get('other');
-  assert.equal(reversed.initiator,false,'original offerer becomes answerer only after three failures');
-  assert.equal(reversed.attempt,4);
-  assert.equal(peer3.pc.connectionState,'closed');
-  assert.deepEqual(socket.sent.at(-1).signal,{type:'retry',attempt:4});
+  assert.equal(t.state.peers.get('other'),peer2);
 
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  const reversed3=t.state.peers.get('other');
+  assert.equal(reversed3.initiator,false,'original offerer swaps roles after two failures');
+  assert.equal(reversed3.attempt,3);
+  assert.equal(peer2.pc.connectionState,'closed');
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'retry',attempt:3});
+  await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:2,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.2 7777 typ host"}})');
+  assert.equal(reversed3.pc.candidates.length,0,'stale candidates ignored after role swap');
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:3,sdp:"reverse-offer"})');
+  assert.equal(reversed3.stage,'answer-sent');
+
+  // The reversed responder can request a retry of the reversed offerer.
+  fireNextTimer(t);
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'retry',attempt:3});
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:4,sdp:"reverse-retry-offer"})');
+  const reversed4=t.state.peers.get('other');
+  assert.notEqual(reversed4,reversed3);
+  assert.equal(reversed4.initiator,false);
+  assert.equal(reversed4.attempt,4);
+  assert.equal(reversed3.pc.connectionState,'closed');
+  assert.equal(reversed4.pc.remoteDescription.sdp,'reverse-retry-offer');
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'answer',attempt:4,sdp:'answer-sdp'});
   await t.run('handleSignal("other","gen-peer",{type:"candidate",attempt:3,candidate:{candidate:"candidate:1 1 udp 1 192.168.1.3 7778 typ host"}})');
-  assert.equal(reversed.pc.candidates.length,0,'old candidates cannot leak into reversed ICE');
-  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:4,sdp:"reverse-offer"})');
-  assert.equal(reversed.stage,'answer-sent');
-  assert.equal(reversed.pc.remoteDescription.sdp,'reverse-offer');
-  assert.equal(socket.sent.at(-1).signal.type,'answer');
-  assert.equal(socket.sent.at(-1).signal.attempt,4);
+  assert.equal(reversed4.pc.candidates.length,0,'stale reversed candidates ignored');
 
+  const before=socket.sent.length;
   fireNextTimer(t);
-  assert.equal(t.state.peers.get('other'),reversed,'fallback ends after fourth attempt');
-  assert.match(reversed.reason,/多次尝试未成功/);
+  assert.equal(t.state.peers.get('other'),reversed4);
+  assert.equal(socket.sent.length,before,'fourth attempt is the final bounded attempt');
+  assert.match(reversed4.reason,/多次尝试未成功/);
 });
 
 test('responder requests a new offer after answer-sent hangs in ICE new', async () => {
@@ -415,33 +421,43 @@ test('responder requests a new offer after answer-sent hangs in ICE new', async 
   assert.equal(peer2.pc.candidates.length,1);
 });
 
-test('original answerer takes offerer role only on bounded reverse retry', async () => {
+test('original answerer offers on attempt 3 and can retry that role once at attempt 4', async () => {
   const t=harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
   const socket=t.FakeWebSocket.sockets[0];
   await join(t,socket);
   await t.run('handleServer({type:"peer-online",id:"other",name:"Sky Deer",generation:"gen-peer"})');
-  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:3,sdp:"old-offer"})');
-  const old=t.state.peers.get('other');
-  assert.equal(old.initiator,false);
-  assert.equal(old.attempt,3);
+  await t.run('handleSignal("other","gen-peer",{type:"offer",attempt:2,sdp:"old-offer"})');
+  const original=t.state.peers.get('other');
+  assert.equal(original.initiator,false);
+  assert.equal(original.attempt,2);
+  await t.run('handleSignal("other","gen-peer",{type:"retry",attempt:3})');
+  const reversed3=t.state.peers.get('other');
+  assert.equal(original.pc.connectionState,'closed');
+  assert.equal(reversed3.initiator,true);
+  assert.equal(reversed3.attempt,3);
+  assert.deepEqual(socket.sent.at(-1).signal,{type:'offer',attempt:3,sdp:'offer-sdp'});
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:2,sdp:"stale-answer"})');
+  assert.equal(reversed3.pc.remoteDescription,null);
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:3,sdp:"reverse-answer"})');
+  assert.equal(reversed3.pc.remoteDescription.sdp,'reverse-answer');
 
-  await t.run('handleSignal("other","gen-peer",{type:"retry",attempt:4})');
-  const reversed=t.state.peers.get('other');
-  assert.equal(old.pc.connectionState,'closed');
-  assert.equal(reversed.initiator,true);
-  assert.equal(reversed.attempt,4);
+  // A failed reversed offer retries in the same reversed direction, not a new role swap.
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  const reversed4=t.state.peers.get('other');
+  assert.equal(reversed3.pc.connectionState,'closed');
+  assert.equal(reversed4.initiator,true);
+  assert.equal(reversed4.attempt,4);
   assert.deepEqual(socket.sent.at(-1).signal,{type:'offer',attempt:4,sdp:'offer-sdp'});
-
-  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:3,sdp:"stale-answer"})');
-  assert.equal(reversed.pc.remoteDescription,null);
-  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:4,sdp:"new-answer"})');
-  assert.equal(reversed.pc.remoteDescription.sdp,'new-answer');
-
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:3,sdp:"stale-reverse-answer"})');
+  assert.equal(reversed4.pc.remoteDescription,null);
+  await t.run('handleSignal("other","gen-peer",{type:"answer",attempt:4,sdp:"new-reverse-answer"})');
+  assert.equal(reversed4.pc.remoteDescription.sdp,'new-reverse-answer');
   const before=socket.sent.length;
   fireNextTimer(t);
-  assert.equal(t.state.peers.get('other'),reversed);
-  assert.equal(socket.sent.length,before,'the final attempt must not loop');
+  assert.equal(t.state.peers.get('other'),reversed4);
+  assert.equal(socket.sent.length,before,'no retry after attempt 4');
 });
 
 test('healthy connected channel awaiting reciprocal ready never triggers reverse offer', async () => {
@@ -449,7 +465,7 @@ test('healthy connected channel awaiting reciprocal ready never triggers reverse
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
   const socket=t.FakeWebSocket.sockets[0];
   await join(t,socket);
-  await t.run('createPeer("other","Sky Deer",true,"gen-peer",3)');
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer",2)');
   const peer=t.state.peers.get('other');
   peer.channel.readyState='open';
   peer.pc.connectionState='connected';
