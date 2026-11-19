@@ -429,3 +429,66 @@ test('rejected remote ICE candidate is counted and propagated', async () => {
   assert.equal(report.detailedPeers[0].rejectedCandidates,1);
   assert.ok(report.events.some(item=>item.event==='webrtc.addIceCandidate.failed'));
 });
+
+test('PC ICE new with accepted Firefox mDNS candidates but no pairs is classified as suspected, not proven', async () => {
+  const h=harness({debug:true});
+  h.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(h,h.FakeWebSocket.sockets[0]);
+  await h.run('createPeer("phone","Phone",false,"gen-phone")');
+  const p=h.state.peers.get('phone');
+  p.attempt=3;
+  p.acceptedCandidates=2;
+  p.rejectedCandidates=0;
+  p.remoteCandidateCount=2;
+  p.pc.iceConnectionState='new';
+  p.pc.localDescription={
+    type:'answer',
+    sdp:'v=0\r\na=candidate:1 1 udp 123 9a88.local 63559 typ host\r\n'
+  };
+  p.pc.remoteDescription={
+    type:'offer',
+    sdp:'v=0\r\na=candidate:0 1 udp 111 abc123.local 60326 typ host\r\na=candidate:1 1 tcp 100 abc123.local 9 typ host tcptype active\r\n'
+  };
+  p.pc.getStats=async()=>new Map([
+    ['lc',{type:'local-candidate',id:'lc',candidateType:'host',port:63559}],
+    ['transport',{type:'transport',id:'transport',iceState:'new',packetsSent:0,packetsReceived:0}],
+  ]);
+  const report=await h.run('buildDiagnosticsReport()');
+  const d=report.detailedPeers[0].iceDiagnosis;
+  assert.equal(d.code,'mdns-resolution-or-candidate-pair-suspected');
+  assert.equal(d.remoteMdnsLines,2);
+  assert.equal(d.localMdnsLines,1);
+  assert.equal(d.candidatesAcceptedByApi,2);
+  assert.equal(d.remoteCandidateStatsReported,0);
+  assert.equal(d.candidatePairsReported,0);
+  assert.ok(d.caveat.includes('不保证'));
+});
+
+test('reported ICE checks without responses are distinguished from absent pairs', () => {
+  const h=harness({debug:true});
+  const pc={iceConnectionState:'checking',localDescription:{sdp:'v=0'},
+    remoteDescription:{sdp:'v=0'}};
+  const d=h.run('diagnoseIce({pc: '+JSON.stringify(pc)+',acceptedCandidates:1,remoteCandidateCount:1}, '+JSON.stringify([
+    {type:'remote-candidate',id:'r'},
+    {type:'candidate-pair',id:'pair',state:'in-progress',requestsSent:5,responsesReceived:0},
+  ])+')');
+  assert.equal(d.code,'checks-without-response');
+  assert.equal(d.reportedCheckCounters.requestsSent,5);
+  assert.equal(d.reportedCheckCounters.responsesReceived,0);
+});
+
+test('missing browser response counter does not imply unanswered checks', () => {
+  const h=harness();
+  const pc={iceConnectionState:'checking',localDescription:{sdp:'v=0'},
+    remoteDescription:{sdp:'v=0'}};
+  const d=h.run('diagnoseIce({pc: '+JSON.stringify(pc)+'}, '+JSON.stringify([
+    {type:'candidate-pair',id:'pair',requestsSent:5,state:'in-progress'},
+  ])+')');
+  assert.equal(d.code,'candidate-pair-reported');
+});
+
+test('connected ICE is reported as connected even when stats omit candidate pairs', () => {
+  const h=harness();
+  const d=h.run('diagnoseIce({pc:{iceConnectionState:"connected",localDescription:null,remoteDescription:null}}, [])');
+  assert.equal(d.code,'ice-connected');
+});
