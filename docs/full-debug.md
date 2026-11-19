@@ -3,9 +3,9 @@
 LAN Room enables **verbose, unredacted console tracing** only when the current tab's URL contains `?debug=1`.
 
 - Debug URL: `https://lan-room-transfer.onrender.com/?debug=1`
-- Normal URL: `https://lan-room-transfer.onrender.com/` (no full trace)
+- Normal URL: `https://lan-room-transfer.onrender.com/` (privacy-reduced ICE diagnostics; no full trace)
 - Refresh **both** the PC browser and the mobile browser using the debug URL before each attempt.
-- In `?debug=1`, click the existing **诊断 → 复制诊断** button to copy complete JSON evidence from that device, without needing a mobile DevTools console. If clipboard permissions block copying, the page attempts to download `lan-room-ice-debug.json` locally. Normal mode still copies a small, redacted status report.
+- In `?debug=1`, click the existing **诊断 → 复制诊断** button to copy complete JSON evidence from that device, without needing a mobile DevTools console. If clipboard permissions block copying, the page attempts to download `lan-room-ice-debug.json` locally. Normal mode now includes a redacted `peers[].iceDiagnosis` with mDNS candidate counts, ICE candidate-pair counts, connectivity-check counters and an interpretation code, without SDP, IP addresses, room code or token. If the clipboard is blocked, both modes try to download a JSON file locally (`lan-room-ice-diagnostics.json` for normal mode; `lan-room-ice-debug.json` for full debug).
 - PC: Chrome/Edge **F12 → Console**, enable **Preserve log**; optionally save the output.
 - Android Chrome: use remote DevTools from a PC (`chrome://inspect/#devices`) to view the phone's console.
 - iPhone Safari: use Safari Web Inspector from a Mac to inspect the phone.
