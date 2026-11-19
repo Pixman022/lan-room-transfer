@@ -909,10 +909,15 @@ function cancelJob(job) {
 function retryJob(job) {
   if (!job.status.startsWith('失败') && job.status !== '已取消') return;
   const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
-  if (!offer) { feedback('共享文件列表已更新，请在房间文件中重新选择', true); return; }
-  job.received = 0; job.chunks = []; job.cancelled = false; job.status = '排队中';
   const file = offer?.files.find(f => f.id === job.fileId);
-  if (file) file.status = 'queued';
+  if (!file) {
+    job.status = '已撤回';
+    feedback('该文件已被撤回，无法重试', true);
+    renderJobs();
+    return;
+  }
+  job.received = 0; job.chunks = []; job.cancelled = false; job.status = '排队中';
+  file.status = 'queued';
   state.queue.push(job); renderJobs(); renderRequests(); startNext();
 }
 
@@ -970,10 +975,12 @@ function withdrawPeerFile(peerId, offerId, fileId) {
   offer.files = offer.files.filter(file => file.id !== fileId);
   if (!offer.files.length) state.offers.delete(key);
   if (state.active?.peerId === peerId && state.active?.fileId === fileId) finishJob('已撤回');
-  for (const job of state.queue.filter(job => job.peerId === peerId && job.fileId === fileId)) {
-    job.status = '已撤回';
+  for (const job of state.jobs) {
+    if (job.peerId === peerId && job.offerId === offerId && job.fileId === fileId && !job.url) {
+      job.status = '已撤回';
+    }
   }
-  state.queue = state.queue.filter(job => !(job.peerId === peerId && job.fileId === fileId));
+  state.queue = state.queue.filter(job => !(job.peerId === peerId && job.offerId === offerId && job.fileId === fileId));
   renderRequests(); renderJobs();
 }
 function discardPeerOffers(peerId) {

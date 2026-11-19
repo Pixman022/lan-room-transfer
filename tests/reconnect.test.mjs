@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { isHostCandidateLine, inspectSelectedPath as inspectRealPath } from '../public/route-policy.js';
+import { sha256Hex as realSha256Hex, isSha256Hex as realIsSha256Hex, verifySha256 as realVerifySha256 } from '../public/checksum.js';
 
 const appSource = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
   .split('\n').filter(line => !line.startsWith('import ')).join('\n');
 
 // Exercise the real room controller against DOM/WebSocket stubs, without network access.
-function harness({debug = false, realRoutePolicy = false} = {}) {
+function harness({debug = false, realRoutePolicy = false, realChecksum = false} = {}) {
   const debugMessages = [];
+  const savedBlobs = [];
   const testConsole = {
     log: (...args) => debugMessages.push(args),
     error: (...args) => console.error(...args),
@@ -114,10 +116,10 @@ function harness({debug = false, realRoutePolicy = false} = {}) {
     fetch: async () => { throw Error('no test network'); },
     navigator: {userAgent: 'TestBrowser'}, crypto: {randomUUID: () => 'test-uuid'},
     Blob, ArrayBuffer, Map, Set, Date, Promise, console: testConsole,
-    URL: {createObjectURL: () => 'blob:test-file', revokeObjectURL() {}},
-    sha256Hex: async () => 'a'.repeat(64),
-    isSha256Hex: value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value),
-    verifySha256: async (blob, hash) => blob.size === 5 && hash === 'a'.repeat(64),
+    URL: {createObjectURL: blob => { savedBlobs.push(blob); return 'blob:test-file'; }, revokeObjectURL() {}},
+    sha256Hex: realChecksum ? realSha256Hex : async () => 'a'.repeat(64),
+    isSha256Hex: realChecksum ? realIsSha256Hex : value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value),
+    verifySha256: realChecksum ? realVerifySha256 : async (blob, hash) => blob.size === 5 && hash === 'a'.repeat(64),
     DEVICE_NAME_KEY: 'device-key',
     getOrCreateDeviceName: () => 'Amber Fox',
     generateDeviceName: () => 'Amber Fox',
@@ -127,7 +129,7 @@ function harness({debug = false, realRoutePolicy = false} = {}) {
   });
   vm.runInContext(appSource, context, {filename:'app.js'});
   const run = expression => vm.runInContext(expression, context);
-  return {state: run('state'), run, timers, elements, FakeWebSocket, FakeRTCPeerConnection, debugMessages};
+  return {state: run('state'), run, timers, elements, FakeWebSocket, FakeRTCPeerConnection, debugMessages, savedBlobs};
 }
 const join = async (t, socket, generation='gen-1') => {
   socket.open();
@@ -138,6 +140,150 @@ const fireNextTimer = t => {
   t.timers.delete(id);
   timer.cb();
 };
+
+// Link two VM peers through an ordered fake DataChannel. No network, but the
+// actual application controller and WebCrypto checksum code run unmodified.
+async function linkedFilePeers({tamperBinary = () => false} = {}) {
+  const sender=harness({realChecksum:true});
+  const receiver=harness({realChecksum:true});
+  for (const t of [sender,receiver]) {
+    t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+    await join(t,t.FakeWebSocket.sockets[0]);
+  }
+  await sender.run('createPeer("receiver","Phone",true,"receiver-generation",3)');
+  await receiver.run('createPeer("sender","Desktop",false,"sender-generation",3)');
+  const a=sender.state.peers.get('receiver');
+  const b=receiver.state.peers.get('sender');
+  const receiverChannel={label:'room-files',ordered:true,readyState:'open',bufferedAmount:0,send(){}};
+  b.pc.ondatachannel({channel:receiverChannel});
+  a.channel.readyState='open';
+  a.channel.bufferedAmount=0;
+  a.ready=true; b.ready=true;
+  a.verified=true; b.verified=true;
+  a.pc.connectionState='connected'; b.pc.connectionState='connected';
+  a.pc.iceConnectionState='connected'; b.pc.iceConnectionState='connected';
+  const senderMessages=[],receiverMessages=[];
+  a.channel.send=data=>{
+    senderMessages.push(data);
+    const transferred=tamperBinary(data) ? new Uint8Array(data.byteLength).fill(88).buffer : data;
+    setImmediate(()=>receiverChannel.onmessage({data:transferred}));
+  };
+  receiverChannel.send=data=>{
+    receiverMessages.push(data);
+    setImmediate(()=>a.channel.onmessage({data}));
+  };
+  return {sender,receiver,a,b,senderMessages,receiverMessages};
+}
+async function flushUntil(predicate, maxMs=2000) {
+  const deadline=Date.now()+maxMs;
+  while(Date.now()<deadline){
+    if(predicate())return;
+    await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  assert.fail('file-transfer condition was not reached within the test deadline');
+}
+
+test('receive queue transfers multiple batches serially with real SHA-256, including an empty file', async () => {
+  const t=await linkedFilePeers();
+  const big=new Blob([new Uint8Array(40001).fill(91)]);
+  const empty=new Blob([]);
+  const last=new Blob(['third file']);
+  t.sender.state.outbound.set('offer-a',new Map([['f1',big],['f2',empty]]));
+  t.sender.state.outbound.set('offer-b',new Map([['f3',last]]));
+  const first={peerId:'sender',offerId:'offer-a',files:[
+    {id:'f1',name:'large.bin',size:big.size,status:'pending'},
+    {id:'f2',name:'empty.txt',size:0,status:'pending'}]};
+  const second={peerId:'sender',offerId:'offer-b',files:[
+    {id:'f3',name:'third.txt',size:last.size,status:'pending'}]};
+  t.receiver.state.offers.set('sender:offer-a',first);
+  t.receiver.state.offers.set('sender:offer-b',second);
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[0])');
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[1])');
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-b"), state.offers.get("sender:offer-b").files[0])');
+  assert.equal(t.receiver.state.jobs.length,3);
+  assert.equal(t.receiver.state.queue.length,2);
+  await flushUntil(()=>t.receiver.state.jobs.every(x=>x.status==='校验通过，点击保存'));
+  assert.equal(t.receiver.state.active,null);
+  assert.equal(t.receiver.state.queue.length,0);
+  assert.equal(t.receiver.savedBlobs.length,3);
+  for(const [i,source] of [big,empty,last].entries())
+    assert.equal(await realSha256Hex(t.receiver.savedBlobs[i]),await realSha256Hex(source));
+  const sent=t.receiverMessages.filter(x=>typeof x==='string').map(x=>JSON.parse(x));
+  assert.deepEqual(sent.map(x=>x.fileId),['f1','f2','f3']);
+  const starts=t.senderMessages.filter(x=>typeof x==='string' && JSON.parse(x).kind==='file-start').map(x=>JSON.parse(x));
+  assert.deepEqual(starts.map(x=>x.fileId),['f1','f2','f3']);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.startsReceived'),3);
+});
+
+test('cancel active file waits for the sender acknowledgement before starting the next queued file', async () => {
+  const t=await linkedFilePeers();
+  let releaseSlice;
+  const blocked={size:5,slice(){return {arrayBuffer:()=>new Promise(resolve=>{releaseSlice=resolve;})};}};
+  const next=new Blob(['world']);
+  t.sender.state.outbound.set('offer-a',new Map([['f1',blocked],['f2',next]]));
+  t.receiver.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',files:[
+    {id:'f1',name:'blocked.txt',size:5,status:'pending'},
+    {id:'f2',name:'next.txt',size:5,status:'pending'},
+  ]});
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[0])');
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[1])');
+  await flushUntil(()=>t.receiver.state.active?.status==='传输中' && releaseSlice);
+  t.receiver.run('cancelJob(state.active)');
+  assert.equal(t.receiver.state.jobs[0].status,'正在取消');
+  assert.equal(t.receiver.state.jobs[1].status,'排队中');
+  assert.equal(t.receiver.state.active?.fileId,'f1');
+  await flushUntil(()=>t.a.sending.get('f1')?.cancelled===true);
+  releaseSlice(new TextEncoder().encode('hello').buffer);
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='已取消' &&
+                   t.receiver.state.jobs[1].status==='校验通过，点击保存');
+  assert.equal(t.receiver.savedBlobs.length,1);
+  assert.equal(await t.receiver.savedBlobs[0].text(),'world');
+  const controls=t.senderMessages.filter(x=>typeof x==='string').map(x=>JSON.parse(x).kind);
+  assert.ok(controls.includes('file-canceled'));
+});
+
+test('checksum failure quarantines corrupted bytes, then retry succeeds with original payload', async () => {
+  let corruption=true;
+  const t=await linkedFilePeers({tamperBinary:data=>corruption && data instanceof ArrayBuffer});
+  const source=new Blob(['Original protected bytes']);
+  t.sender.state.outbound.set('offer-a',new Map([['f1',source]]));
+  t.receiver.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',
+    files:[{id:'f1',name:'payload.txt',size:source.size,status:'pending'}]});
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('SHA-256 校验失败'));
+  assert.equal(t.receiver.state.jobs[0].url,null,'corrupted download must never be exposed');
+  assert.equal(t.receiver.savedBlobs.length,0);
+  corruption=false;
+  t.receiver.run('retryJob(state.jobs[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存');
+  assert.equal(t.receiver.savedBlobs.length,1);
+  assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(source));
+});
+
+test('retry of a withdrawn file is rejected when its offer still has other files', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("sender","Desktop",true,"gen-sender")');
+  const p=t.state.peers.get('sender');
+  p.ready=true; p.channel.readyState='open';
+  const sent=[];
+  p.channel.send=data=>sent.push(JSON.parse(data));
+  t.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',files:[
+    {id:'f1',name:'withdrawn.txt',size:5,status:'pending'},
+    {id:'f2',name:'still-present.txt',size:5,status:'pending'}]});
+  t.run('acceptFile(state.offers.get("sender:offer-a"), state.offers.get("sender:offer-a").files[0])');
+  t.run('failActive("模拟失败")');
+  t.run('withdrawPeerFile("sender","offer-a","f1")');
+  assert.equal(t.state.offers.get('sender:offer-a').files.length,1);
+  assert.equal(t.state.jobs[0].status,'已撤回','withdrawal removes stale retry action');
+  t.run('state.jobs[0].status="失败：模拟失败"');
+  t.run('retryJob(state.jobs[0])');
+  assert.equal(t.state.jobs[0].status,'已撤回','stale retry cannot queue a withdrawn file');
+  assert.equal(t.state.active,null);
+  assert.equal(t.state.queue.length,0);
+  assert.equal(sent.length,1,'do not send another request for a withdrawn file');
+});
 
 test('file request acknowledges promptly then transfers a small file over the private channel', async () => {
   const sender=harness();
