@@ -264,7 +264,7 @@ async def ws_handler(request):
                         set(signal) - {"type", "sdp", "candidate", "attempt"}):
                     raise ValueError("不允许的信令消息类型")
                 attempt = signal.get("attempt")
-                if attempt is not None and (type(attempt) is not int or not 0 <= attempt <= 3):
+                if attempt is not None and (type(attempt) is not int or not 0 <= attempt <= 4):
                     raise ValueError("ICE 协商轮次无效")
                 if signal["type"] == "retry":
                     if type(attempt) is not int or attempt < 1 or set(signal) != {"type", "attempt"}:

@@ -294,10 +294,24 @@ class SignallingTests(AioHTTPTestCase):
         forwarded = await b.receive_json()
         self.assertEqual(forwarded["signal"]["attempt"], 2)
 
+        # The fourth attempt reverses offerer/answerer roles, but still carries
+        # only an ICE retry or host-only SDP/candidates through signalling.
+        await a.send_json({"type": "signal", "to": b_welcome["id"],
+                           "toGeneration": b_welcome["generation"],
+                           "signal": {"type": "retry", "attempt": 4}})
+        forwarded = await b.receive_json()
+        self.assertEqual(forwarded["signal"], {"type": "retry", "attempt": 4})
+        await b.send_json({"type": "signal", "to": a_welcome["id"],
+                           "toGeneration": a_welcome["generation"],
+                           "signal": {"type": "offer", "attempt": 4, "sdp": "reverse-offer"}})
+        forwarded = await a.receive_json()
+        self.assertEqual(forwarded["signal"]["attempt"], 4)
+
         for payload in (
             {"type": "retry", "attempt": -1},
             {"type": "retry", "attempt": True},
-            {"type": "retry", "attempt": 4},
+            {"type": "retry", "attempt": 5},
+            {"type": "offer", "attempt": 5, "sdp": "invalid"},
             {"type": "retry", "attempt": 1, "sdp": "extra"},
         ):
             await a.send_json({"type": "signal", "to": b_welcome["id"],
