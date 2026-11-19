@@ -120,11 +120,30 @@ function sendSignal(to, signal) {
     trace('signal.skipped', { to, signal, peerGeneration: peer?.generation, websocketState: state.ws?.readyState });
   }
 }
+// Privacy-reduced counters expose control-flow failures without file IDs,
+// names, room codes, candidate addresses or packet payloads.
+const TRANSFER_CONTROLS = new Set(['request-file', 'file-request-ack', 'file-start', 'file-end', 'file-error']);
+function countTransfer(peer, event) {
+  if (!peer) return;
+  peer.transferEvents ??= {};
+  peer.transferEvents[event] = (peer.transferEvents[event] || 0) + 1;
+  peer.lastTransferEvent = event;
+}
 function sendPeer(peer, control) {
-  if (!peer?.ready || peer.channel?.readyState !== 'open') return false;
+  if (!peer?.ready || peer.channel?.readyState !== 'open') {
+    if (TRANSFER_CONTROLS.has(control.kind)) countTransfer(peer, 'send-unavailable');
+    return false;
+  }
   tracePeer(peer, 'datachannel.send', { control });
-  peer.channel.send(JSON.stringify(control));
-  return true;
+  try {
+    peer.channel.send(JSON.stringify(control));
+    if (TRANSFER_CONTROLS.has(control.kind)) countTransfer(peer, control.kind + ':sent');
+    return true;
+  } catch (err) {
+    countTransfer(peer, 'send-error');
+    tracePeer(peer, 'datachannel.send.failed', { kind: control.kind, error: String(err) });
+    return false;
+  }
 }
 function deviceName() { return currentDeviceName; }
 function updateDeviceAvatar() {
@@ -632,6 +651,7 @@ async function receiveChannel(peer, data) {
   try { msg = JSON.parse(data); }
   catch { return; }
   tracePeer(peer, 'datachannel.receive', { message: msg });
+  if (TRANSFER_CONTROLS.has(msg.kind)) countTransfer(peer, msg.kind + ':received');
   if (msg.kind === 'ready') {
     peer.remoteReady = true;
     peer.remoteHostPairVerified = msg.hostHostVerified === true;
@@ -653,7 +673,10 @@ async function receiveChannel(peer, data) {
     renderPeers();
     return;
   }
-  if (!peer.ready) return;
+  if (!peer.ready) {
+    if (TRANSFER_CONTROLS.has(msg.kind)) countTransfer(peer, 'control-ignored-unready');
+    return;
+  }
   if (msg.kind === 'file-list') {
     if (typeof msg.offerId !== 'string' || !Array.isArray(msg.files) || msg.files.length > MAX_FILES ||
         msg.files.some(f => typeof f.id !== 'string' || typeof f.name !== 'string' ||
@@ -670,6 +693,14 @@ async function receiveChannel(peer, data) {
     }
   } else if (msg.kind === 'request-file') {
     void startSendingFile(peer, msg);
+  } else if (msg.kind === 'file-request-ack') {
+    const job = state.active;
+    if (job && job.peerId === peer.id && job.offerId === msg.offerId &&
+        job.fileId === msg.fileId && job.status === '等待发送端') {
+      job.status = '发送端已响应，等待文件启动';
+      armJobTimer(job, 20000, '发送端已响应，但未开始发送');
+      renderJobs();
+    }
   } else if (msg.kind === 'cancel-file') {
     peer.sending.get(msg.fileId)?.cancel();
   } else if (msg.kind === 'file-start') {
@@ -720,12 +751,22 @@ async function startSendingFile(peer, request) {
   tracePeer(peer, 'file.send.request', { request, fileName: file?.name,
     fileSize: file?.size });
   if (!file || !peer.ready) {
+    countTransfer(peer, !file ? 'source-unavailable' : 'sender-not-ready');
     sendPeer(peer, { kind: 'file-error', fileId: request.fileId, message: '原文件已不可用，请重新选择发送' });
     return;
   }
-  if (peer.sending.has(request.fileId)) return;
+  if (peer.sending.has(request.fileId)) {
+    countTransfer(peer, 'duplicate-request-ignored');
+    return;
+  }
   const token = { cancelled: false, cancel() { this.cancelled = true; } };
   peer.sending.set(request.fileId, token);
+  // Confirm that the sender received the request before checking browser
+  // stats or reading the file; this separates signaling from sender stalls.
+  if (!sendPeer(peer, { kind: 'file-request-ack', offerId: request.offerId, fileId: request.fileId })) {
+    peer.sending.delete(request.fileId);
+    return;
+  }
   try {
     const path = await inspectPeerPath(peer);
     if (!path.allowed) throw new Error(path.reason);
@@ -752,6 +793,7 @@ async function startSendingFile(peer, request) {
       else sendPeer(peer, { kind: 'file-end', offerId: request.offerId, fileId: request.fileId, sha256 });
     }
   } catch (err) {
+    countTransfer(peer, 'sender-failed');
     sendPeer(peer, { kind: 'file-error', fileId: request.fileId, message: String(err.message).slice(0, 160) });
   } finally {
     peer.sending.delete(request.fileId);
@@ -940,6 +982,24 @@ function diagnosticsSnapshot() {
       candidatesSent: peer.candidateCount || 0,
       candidatesReceived: peer.remoteCandidateCount || 0,
       canTransfer: Boolean(peer.ready),
+      transfer: {
+        requestsSent: peer.transferEvents?.['request-file:sent'] || 0,
+        requestsReceived: peer.transferEvents?.['request-file:received'] || 0,
+        acksSent: peer.transferEvents?.['file-request-ack:sent'] || 0,
+        acksReceived: peer.transferEvents?.['file-request-ack:received'] || 0,
+        startsSent: peer.transferEvents?.['file-start:sent'] || 0,
+        startsReceived: peer.transferEvents?.['file-start:received'] || 0,
+        errorsSent: peer.transferEvents?.['file-error:sent'] || 0,
+        errorsReceived: peer.transferEvents?.['file-error:received'] || 0,
+        sendUnavailable: peer.transferEvents?.['send-unavailable'] || 0,
+        sendErrors: peer.transferEvents?.['send-error'] || 0,
+        ignoredBeforeReady: peer.transferEvents?.['control-ignored-unready'] || 0,
+        duplicateRequests: peer.transferEvents?.['duplicate-request-ignored'] || 0,
+        sourceUnavailable: peer.transferEvents?.['source-unavailable'] || 0,
+        senderFailures: peer.transferEvents?.['sender-failed'] || 0,
+        lastEvent: peer.lastTransferEvent || 'none',
+        activeReceiveStatus: state.active?.peerId === peer.id ? state.active.status : null,
+      },
       // Do not copy room codes, member names, IP addresses or file names.
       reason: String(peer.reason ?? '').replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]').slice(0, 180),
     })),
@@ -1088,6 +1148,8 @@ function renderDiagnostics() {
     if (peer.route) {
       root.append(elem('p', 'diagnostic-line', `路径：${peer.route.code}（本地 ${peer.route.localAddressKind} / 远端 ${peer.route.remoteAddressKind}）`));
     }
+    root.append(elem('p', 'diagnostic-line',
+      `文件请求 发/收 ${peer.transfer.requestsSent}/${peer.transfer.requestsReceived} · 确认 发/收 ${peer.transfer.acksSent}/${peer.transfer.acksReceived} · 启动 发/收 ${peer.transfer.startsSent}/${peer.transfer.startsReceived} · 最近 ${peer.transfer.lastEvent}`));
   }
 }
 $('toggle-diagnostics').addEventListener('click', () => {
