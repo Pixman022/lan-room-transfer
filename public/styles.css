@@ -134,6 +134,8 @@ main { min-height: calc(100vh - 76px); }
 .request-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
 .request-head strong { font-size: 13px; }
 .request-head small { color: var(--muted); }
+.request .file-row { align-items: flex-start; }
+.request .file-row .item-info { flex: 1; }
 .request-footer { display: flex; justify-content: flex-end; margin-top: 10px; }
 .progress { height: 6px; border-radius: 99px; background: var(--tint-blue); margin: 8px 0 0; overflow: hidden; }
 .progress div { height: 100%; background: var(--accent-hover); transition: width .15s; }
