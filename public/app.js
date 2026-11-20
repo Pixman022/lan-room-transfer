@@ -107,6 +107,16 @@ function feedback(text, error = false) {
   $('feedback').textContent = text;
   $('feedback').className = error ? 'feedback error' : 'feedback';
 }
+let toastTimer = null;
+function showToast(message) {
+  if (toastTimer !== null) clearTimeout(toastTimer);
+  $('toast-message').textContent = message;
+  $('toast').hidden = false;
+  toastTimer = setTimeout(() => {
+    $('toast').hidden = true;
+    toastTimer = null;
+  }, 2400);
+}
 function setEntryLoading(loading) {
   $('enter-room').disabled = loading;
   $('enter-room').setAttribute('aria-busy', String(loading));
@@ -221,7 +231,10 @@ function finishDeviceNameEdit(labelId, cancel = false) {
   label.contentEditable = 'false';
   label.removeAttribute('role');
   label.removeAttribute('aria-label');
-  if (!cancel && saveDeviceName(nextName)) feedback('设备名称已保存');
+  const previousName = deviceName();
+  if (!cancel && saveDeviceName(nextName) && deviceName() !== previousName) {
+    showToast('设备名称已修改');
+  }
   updateDeviceAvatar();
 }
 function rememberRoom() {
@@ -1743,7 +1756,7 @@ $('toggle-diagnostics').addEventListener('click', () => {
 });
 $('copy-diagnostics').addEventListener('click', async () => {
   const report = JSON.stringify(await buildDiagnosticsReport(), null, 2);
-  try { await navigator.clipboard.writeText(report); feedback('诊断已复制'); }
+  try { await navigator.clipboard.writeText(report); showToast('诊断已复制'); }
   catch {
     // Mobile Firefox may reject clipboard access. Both report modes can be
     // downloaded locally without sending diagnostics through signaling.
@@ -1965,7 +1978,10 @@ $('leave-room').onclick = () => {
   setEntryLoading(false);
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };
-$('copy-code').onclick = async () => { try { await navigator.clipboard.writeText(state.code); feedback('房间码已复制'); } catch { feedback(`房间码：${state.code}`); } };
+$('copy-code').onclick = async () => {
+  try { await navigator.clipboard.writeText(state.code); showToast('房间号已复制'); }
+  catch { feedback(`房间码：${state.code}`); }
+};
 $('drop-zone').addEventListener('click', () => {
   const picker = $('send-files');
   picker.value = '';
