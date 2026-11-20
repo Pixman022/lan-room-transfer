@@ -2258,3 +2258,64 @@ test('pairing view keeps device name under avatar and current-device badge above
   assert.match(css, /\.entry-device \.device-name-text\s*\{/);
   assert.doesNotMatch(css, /\.entry-room-code label\s*\{\s*text-align:\s*center;/);
 });
+
+
+test('copy and real device rename show one replaceable success toast that auto-hides', async () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  assert.match(html, /id="toast"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/);
+  assert.match(css, /\.toast\s*\{[^}]*position:\s*fixed;/);
+  const t = harness();
+  t.run("navigator.clipboard = {writeText: async value => {window.__copied = value}}");
+  t.state.code = 'ROOM42';
+  await t.elements.get('copy-code').onclick();
+  assert.equal(t.run('window.__copied'), 'ROOM42');
+  assert.equal(t.elements.get('toast').hidden, false);
+  assert.equal(t.elements.get('toast-message').textContent, '房间号已复制');
+  assert.equal(t.elements.get('feedback').textContent, '', 'success does not overwrite permanent feedback');
+  const copyTimer = t.run('toastTimer');
+  assert.equal(t.timers.get(copyTimer).ms, 2400);
+
+  const label = t.elements.get('home-device-label');
+  t.elements.get('edit-home-device-name').onclick();
+  label.textContent = 'Coral Fox';
+  label.emit('keydown', {key: 'Enter', preventDefault() {}});
+  assert.equal(t.elements.get('toast-message').textContent, '设备名称已修改');
+  const renameTimer = t.run('toastTimer');
+  assert.notEqual(renameTimer, copyTimer);
+  assert.equal(t.timers.has(copyTimer), false, 'next toast cancels old dismissal');
+  assert.equal(t.timers.get(renameTimer).ms, 2400);
+
+  t.elements.get('edit-home-device-name').onclick();
+  label.textContent = 'Coral Fox';
+  label.emit('blur');
+  assert.equal(t.run('toastTimer'), renameTimer, 'unchanged name does not show success');
+  t.elements.get('edit-home-device-name').onclick();
+  label.textContent = 'Not saved';
+  label.emit('keydown', {key: 'Escape', preventDefault() {}});
+  assert.equal(t.run('toastTimer'), renameTimer, 'cancel does not show success');
+
+  t.timers.get(renameTimer).cb();
+  t.timers.delete(renameTimer);
+  assert.equal(t.elements.get('toast').hidden, true);
+  assert.equal(t.run('toastTimer'), null);
+});
+
+test('clipboard failure keeps room-code fallback without a success toast', async () => {
+  const t = harness();
+  t.state.code = 'ROOM42';
+  await t.elements.get('copy-code').onclick();
+  assert.equal(t.elements.get('feedback').textContent, '房间码：ROOM42');
+  assert.equal(t.elements.get('toast-message').textContent, '');
+  assert.equal(t.run('toastTimer'), null);
+});
+
+test('successful diagnostics copy uses the same toast without exposing report contents', async () => {
+  const t = harness();
+  t.run("navigator.clipboard = {writeText: async value => {window.__copied = value}}");
+  await t.elements.get('copy-diagnostics').handlers.click[0]();
+  assert.ok(t.run('window.__copied').includes('"peerCount"'));
+  assert.equal(t.elements.get('toast-message').textContent, '诊断已复制');
+  assert.equal(t.elements.get('toast').hidden, false);
+  assert.equal(t.timers.get(t.run('toastTimer')).ms, 2400);
+});
