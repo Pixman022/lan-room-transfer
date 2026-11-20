@@ -283,7 +283,7 @@ test('three peers: concurrent independent receivers and a second uploader never 
   await link('B','C');
 
   const filesA=new Map([
-    ['a1',new Blob([new Uint8Array(45001).fill(65)])],
+    ['a1',new Blob([new Uint8Array(1024*1024+257).fill(65)])],
     ['a2',new Blob([])],
     ['a3',new Blob(['only A offered this file'])],
   ]);
