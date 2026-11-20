@@ -227,6 +227,73 @@ test('shared catalog missed before reciprocal P2P ready is replayed after receiv
     'ordinary catalog diagnostics never reveal the filename');
 });
 
+test('MULTI-03: dropped B catalog after transient A disconnect is recovered on a verified live path', async () => {
+  const t=await linkedFilePeers();
+  // Before the network transition, the receiver already spent its one-time
+  // catalog request and the sender has already served it once.
+  t.receiver.run('requestSharedOffers(state.peers.get("sender"))');
+  await flushUntil(()=>t.a.catalogReplayDone === true && t.b.catalogRequested === true);
+  const originalPeers=t.receiver.FakeRTCPeerConnection.instances.length;
+  const originalOffers=t.receiver.FakeWebSocket.sockets[0].sent.filter(m=>m.signal?.type==='offer').length;
+  t.b.pc.connectionState='disconnected';
+  t.b.pc.onconnectionstatechange();
+  assert.equal(t.b.ready,false);
+  assert.equal(t.b.verified,true);
+  assert.equal(t.b.remoteReady,true);
+
+  const source=new Blob(['B uploaded after a temporary channel outage']);
+  t.sender.state.outbound.set('offer-b-new',new Map([['b-file',source]]));
+  t.sender.state.ownOffers.push({offerId:'offer-b-new',files:[
+    {id:'b-file',name:'B_reply_1MiB.bin',size:source.size}
+  ]});
+  t.sender.run('syncSharedOffers(state.peers.get("receiver"))');
+  await flushUntil(()=>t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogsIgnoredBeforeReady')===1);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().visibleRemoteFiles'),0);
+  assert.equal(t.a.syncedOffers.has('offer-b-new'),true,'sender believes late catalog was sent');
+
+  t.b.pc.connectionState='connected';
+  t.b.pc.onconnectionstatechange();
+  await flushUntil(()=>t.b.ready && t.receiver.state.offers.has('sender:offer-b-new'));
+  assert.equal(t.b.reason,'文件直连就绪');
+  assert.equal(t.receiver.state.offers.size,1,'deduplicate catalogs after recovery');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().visibleRemoteFiles'),1);
+  assert.equal(t.a.catalogReplayDone,true,'initial replay has already been used');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRefreshRequestsSent'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogRefreshRequestsReceived'),1);
+  assert.equal(t.receiver.FakeRTCPeerConnection.instances.length,originalPeers,'do not renegotiate ICE');
+  assert.equal(t.receiver.FakeWebSocket.sockets[0].sent.filter(m=>m.signal?.type==='offer').length,
+    originalOffers,'no new SDP offers');
+
+  const sentBefore=t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogsSent');
+  await t.sender.run('receiveChannel(state.peers.get("receiver"),JSON.stringify({kind:"file-list-request",refreshSeq:1}))');
+  await t.sender.run('receiveChannel(state.peers.get("receiver"),JSON.stringify({kind:"file-list-request"}))');
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogsSent'),sentBefore,
+    'duplicate refresh and legacy requests cannot amplify file catalogs');
+  const offer=t.receiver.state.offers.get('sender:offer-b-new');
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-b-new"),state.offers.get("sender:offer-b-new").files[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0]?.status==='校验通过，点击保存');
+  assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(source));
+});
+
+test('MULTI-03: a P2P link returning to connected cannot restore file transport over an unsafe selected path', async () => {
+  const t=await linkedFilePeers();
+  t.receiver.run('requestSharedOffers(state.peers.get("sender"))');
+  await flushUntil(()=>t.a.catalogReplayDone===true);
+  const requestsBefore=t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsSent');
+  t.b.pc.connectionState='disconnected';
+  t.b.pc.onconnectionstatechange();
+  assert.equal(t.b.ready,false);
+  t.receiver.run('inspectSelectedPath = async () => ({allowed:false,code:"relay",reason:"Unsafe selected relay path"})');
+  t.b.pc.connectionState='connected';
+  t.b.pc.onconnectionstatechange();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(t.b.ready,false,'a stale previous approval must never restore transfer');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsSent'),requestsBefore,
+    'no refresh over a denied selected route');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRefreshRequestsSent'),0);
+  assert.notEqual(t.b.reason,'文件直连就绪');
+});
+
 test('receive queue transfers multiple batches serially with real SHA-256, including an empty file', async () => {
   const t=await linkedFilePeers();
   const big=new Blob([new Uint8Array(40001).fill(91)]);
