@@ -2231,7 +2231,7 @@ test('room number copy icon replaces online badge and redundant toolbar button',
   const t = harness();
   t.state.code = 'ROOM42';
   await t.elements.get('copy-code').onclick();
-  assert.equal(t.elements.get('feedback').textContent, '房间码：ROOM42');
+  assert.equal(t.elements.get('feedback').textContent, '复制失败，房间号：ROOM42');
 });
 
 
@@ -2257,4 +2257,34 @@ test('pairing view keeps device name under avatar and current-device badge above
   const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
   assert.match(css, /\.entry-device \.device-name-text\s*\{/);
   assert.doesNotMatch(css, /\.entry-room-code label\s*\{\s*text-align:\s*center;/);
+});
+
+test('copy and name edit success show a reusable temporary toast, not page feedback', async () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.match(html, /id="action-toast"[^>]*role="status"[^>]*hidden/);
+  const t = harness();
+  const toast = t.elements.get('action-toast');
+  t.run("navigator.clipboard = {writeText: async code => { if (code !== 'ROOM42') throw Error('unexpected code'); }}");
+  t.state.code = 'ROOM42';
+  await t.elements.get('copy-code').onclick();
+  assert.equal(toast.textContent, '房间号已复制');
+  assert.equal(toast.hidden, false);
+  assert.equal(t.elements.get('feedback').textContent, '');
+  assert.equal(t.timers.size, 1);
+
+  t.elements.get('edit-home-device-name').onclick();
+  t.elements.get('home-device-label').textContent = 'Brave Fox';
+  t.elements.get('home-device-label').emit('keydown', {key:'Enter',preventDefault(){}});
+  assert.equal(toast.textContent, '设备名称已修改');
+  assert.equal(toast.hidden, false);
+  assert.equal(t.timers.size, 1, 'new toast cancels old dismissal');
+  assert.equal(t.state.code, 'ROOM42');
+  fireNextTimer(t);
+  assert.equal(toast.hidden, true);
+  assert.equal(t.timers.size, 0);
+
+  t.elements.get('edit-home-device-name').onclick();
+  t.elements.get('home-device-label').textContent = 'Abandoned';
+  t.elements.get('home-device-label').emit('keydown', {key:'Escape',preventDefault(){}});
+  assert.equal(toast.hidden, true, 'cancel should not show a success toast');
 });
