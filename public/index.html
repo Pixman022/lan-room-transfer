@@ -37,7 +37,7 @@
           <input id="room-code-input" maxlength="16" autocomplete="off" spellcheck="false" aria-label="房间码" placeholder="1234 / HOME2026" />
           <button id="regenerate-code" class="secondary" type="button" title="更换随机码" aria-label="更换随机码">↻</button>
         </div>
-        <button id="enter-room" class="primary wide" type="button">进入房间 <span aria-hidden="true">→</span></button>
+        <button id="enter-room" class="primary wide" type="button" aria-busy="false"><span id="entry-loading-icon" class="entry-loading-spinner" aria-hidden="true" hidden></span><span id="entry-button-label">进入房间</span><span id="entry-button-arrow" aria-hidden="true">→</span></button>
       </div>
     </section>
 
