@@ -2233,3 +2233,21 @@ test('room number copy icon replaces online badge and redundant toolbar button',
   await t.elements.get('copy-code').onclick();
   assert.equal(t.elements.get('feedback').textContent, '房间码：ROOM42');
 });
+
+
+test('pairing card places room number below avatar and current device in a compact inline-edit tag', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  const avatar = html.indexOf('class="entry-avatar"');
+  const code = html.indexOf('class="entry-room-code"');
+  const device = html.indexOf('class="entry-device-chip"');
+  const enter = html.indexOf('id="enter-room"');
+  assert.ok(avatar > 0 && avatar < code && code < device && device < enter,
+    'entry card order must be avatar, room code, device tag, then enter button');
+  assert.match(html, /<label for="room-code-input">房间号<\/label>/);
+  assert.match(html, /class="entry-device-chip"[\s\S]*?id="home-device-label"[\s\S]*?id="edit-home-device-name"/);
+  assert.doesNotMatch(html, /id="device-name"|id="room-device-name"/);
+  assert.equal((html.match(/id="home-device-label"/g) ?? []).length, 1);
+  assert.match(css, /\.entry-device-chip\s*\{[^}]*width:\s*fit-content;/);
+  assert.match(css, /\.entry-device-chip\s+\.device-name-text\s*\{[^}]*font-size:\s*13px;/);
+});
