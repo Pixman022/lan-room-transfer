@@ -2263,13 +2263,13 @@ test('copy and name edit success show a reusable temporary toast, not page feedb
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   assert.match(html, /id="action-toast"[^>]*role="status"[^>]*hidden/);
   const t = harness();
-  const toast = t.elements.get('action-toast');
+  const toast = t.run("document.getElementById('action-toast')");
   t.run("navigator.clipboard = {writeText: async code => { if (code !== 'ROOM42') throw Error('unexpected code'); }}");
   t.state.code = 'ROOM42';
   await t.elements.get('copy-code').onclick();
   assert.equal(toast.textContent, '房间号已复制');
   assert.equal(toast.hidden, false);
-  assert.equal(t.elements.get('feedback').textContent, '');
+  assert.equal(t.run("document.getElementById('feedback').textContent"), '');
   assert.equal(t.timers.size, 1);
 
   t.elements.get('edit-home-device-name').onclick();
