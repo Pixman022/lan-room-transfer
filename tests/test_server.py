@@ -105,6 +105,95 @@ class RoomUnitTests(unittest.TestCase):
                 rooms.validate_code(code)
 
 
+
+class RoomLifecycleIntegrationTests(AioHTTPTestCase):
+    async def get_application(self):
+        self.now = [1000.0]
+        self.registry = RoomRegistry(clock=lambda: self.now[0])
+        return create_app(registry=self.registry)
+
+    async def enter(self, code, name, previous=None):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        ws = await self.client.ws_connect("/ws", headers=origin)
+        payload = {"type": "enter", "code": code, "name": name}
+        if previous:
+            payload.update(id=previous["id"], token=previous["token"])
+        await ws.send_json(payload)
+        welcome = await ws.receive_json(timeout=2)
+        self.assertEqual(welcome["type"], "welcome")
+        return ws, welcome
+
+    async def until(self, predicate):
+        # WebSocket close callbacks run asynchronously. Wait for cleanup, not
+        # for the 120-second test clock to elapse in real time.
+        for _ in range(100):
+            if predicate():
+                return
+            await asyncio.sleep(0.01)
+        self.fail("WebSocket teardown did not reach the expected room state")
+
+    async def test_creator_leaves_and_last_member_can_resume_until_exact_expiry(self):
+        code = "TESTROOM26"
+        a, a_info = await self.enter(code, "Creator")
+        self.assertTrue(a_info["created"])
+        b, b_info = await self.enter(code, "Member B")
+        self.assertFalse(b_info["created"])
+        self.assertEqual((await a.receive_json(timeout=2))["type"], "peer-online")
+        c, c_info = await self.enter(code, "Member C")
+        self.assertFalse(c_info["created"])
+        self.assertEqual(len(c_info["peers"]), 2)
+        self.assertEqual((await a.receive_json(timeout=2))["type"], "peer-online")
+        self.assertEqual((await b.receive_json(timeout=2))["type"], "peer-online")
+        room = self.registry.rooms[code]
+        self.assertEqual(len(room.online()), 3)
+
+        # Creator departure does not expire the room or interrupt the two
+        # remaining sockets: the server must still forward targeted signaling.
+        await a.close()
+        self.assertEqual((await b.receive_json(timeout=2))["type"], "peer-offline")
+        self.assertEqual((await c.receive_json(timeout=2))["type"], "peer-offline")
+        self.assertEqual(len(room.online()), 2)
+        self.assertIsNone(room.empty_at)
+        await b.send_json({"type": "signal", "to": c_info["id"],
+                           "toGeneration": c_info["generation"],
+                           "signal": {"type": "offer", "attempt": 1, "sdp": "test-offer"}})
+        forwarded = await c.receive_json(timeout=2)
+        self.assertEqual(forwarded["type"], "signal")
+        self.assertEqual(forwarded["from"], b_info["id"])
+        self.assertEqual(forwarded["signal"]["sdp"], "test-offer")
+
+        await b.close()
+        self.assertEqual((await c.receive_json(timeout=2))["type"], "peer-offline")
+        await c.close()
+        await self.until(lambda: room.empty_at == self.now[0])
+        self.assertIs(self.registry.rooms[code], room)
+
+        # A valid browser session resumes the same identity and room during
+        # the 2-minute grace window, resetting the idle expiry clock.
+        self.now[0] += 119
+        resumed, resumed_info = await self.enter(code, "Member B", b_info)
+        self.assertFalse(resumed_info["created"])
+        self.assertEqual(resumed_info["id"], b_info["id"])
+        self.assertNotEqual(resumed_info["generation"], b_info["generation"])
+        self.assertIs(self.registry.rooms[code], room)
+        self.assertIsNone(room.empty_at)
+        await resumed.close()
+        await self.until(lambda: room.empty_at == self.now[0])
+
+        # The room remains reserved up to but not including 120s idle.
+        self.now[0] += 119
+        self.registry.sweep()
+        self.assertIs(self.registry.rooms[code], room)
+        self.now[0] += 1
+        fresh, new_info = await self.enter(code, "New Member", b_info)
+        self.assertTrue(new_info["created"])
+        self.assertNotEqual(new_info["id"], b_info["id"])
+        self.assertEqual(new_info["peers"], [])
+        self.assertIsNot(self.registry.rooms[code], room)
+        self.assertEqual(len(self.registry.rooms[code].members), 1)
+        await fresh.close()
+
+
 class SignallingTests(AioHTTPTestCase):
     async def get_application(self):
         return create_app()
