@@ -40,6 +40,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--line-strong
 .connection-status { font-size: 12px; color: var(--tint-blue-ink); background: var(--tint-blue); padding: 6px 12px; border-radius: 99px; }
 .connection-status { display: inline-flex; align-items: center; gap: 7px; }
 .connection-status::before { content: ''; width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--muted); }
+.connection-status[data-state='room']::before { background: #4f83bb; }
 .connection-status[data-state='waiting']::before { background: #d58a32; }
 .connection-status[data-state='ready']::before { background: #27885a; }
 
