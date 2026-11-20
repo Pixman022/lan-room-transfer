@@ -861,9 +861,12 @@ async function receiveChannel(peer, data) {
   tracePeer(peer, 'datachannel.receive', { message: msg });
   if (TRANSFER_CONTROLS.has(msg.kind)) countTransfer(peer, msg.kind + ':received');
   if (msg.kind === 'ready') {
+    // A duplicate remote ready cannot override a revoked local transfer gate.
+    // Previously-ready links must re-attest the CURRENT selected path.
+    const needsRecoveryCheck = peer.readyAt !== null && !peer.ready;
     peer.remoteReady = true;
     peer.remoteHostPairVerified = msg.hostHostVerified === true;
-    peer.ready = peer.verified;
+    peer.ready = peer.verified && !needsRecoveryCheck;
     if (peer.ready) peer.readyAt ??= Date.now();
     tracePeer(peer, 'datachannel.ready.received', {
       localReadySent: peer.localReadySent, localRouteVerified: peer.verified,
@@ -873,6 +876,8 @@ async function receiveChannel(peer, data) {
     // even if the regular onopen polling window has already elapsed.
     if (!peer.verified && peer.channel?.readyState === 'open') {
       void verifyPeerPath(peer);
+    } else if (needsRecoveryCheck) {
+      void restorePeerAfterTransientDisconnect(peer);
     } else if (msg.requestReciprocal === true && peer.localReadySent &&
                !peer.readyEchoAnswered) {
       // A peer may have missed our initial ready. Reply at most once, after
