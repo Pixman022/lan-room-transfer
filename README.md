@@ -52,6 +52,20 @@ Open **http://127.0.0.1:8765** in a browser. The page suggests a random device n
 
 For actual two-device testing, deploy the app + signalling server behind a **trusted HTTPS origin with WebSocket (`wss://`) support**, then open the same public URL on two different devices connected to a LAN. No local server is needed for those users. Ensure `PUBLIC_ORIGIN` exactly equals the public `https://...` origin. A static GitHub Pages site alone cannot host this WebSocket signalling server.
 
+## Optional coordinated three-device QA test (hidden in normal mode)
+
+To test **real concurrent file bytes with one human operating A/B/C**, use the explicitly opt-in URL
+`https://lan-room-transfer.onrender.com/?qa=1` **on all three browsers**. The normal URL never shows this panel. This is a local test aid, not an automatic transfer feature or a new product flow.
+
+1. A, B and C enter the **same room**, and verify A↔B and A↔C have `canTransfer:true` in ordinary diagnostics. Keep all three tabs **foreground**: mobile/browser background throttling can delay timers.
+2. **Before starting:** A shares `A_primary_64MiB.bin` or a smaller test file; B shares `B_reply_32MiB.bin` or a smaller test file. B and C must see A's file; A must see B's file.
+3. On **C** select A's file in **并发验收 · 同步接收**, click **准备接收**. On **B**, select the *same* A file and click **准备接收**. On **A**, select B's file and click **准备接收**. These actions only stage local choices; no file bytes are requested yet.
+4. Only on **A**, click **同步开始（只在 A 点击）** *once*. A sends a tiny `qa-start` command to B and C **only over already verified P2P DataChannels**, and all three armed browsers schedule their ordinary `acceptFile` flow after a **6-second** local countdown. Other tabs, ordinary mode, unarmed clients, stale selections or unsafe/not-ready peer links do not trigger automatic reception. There are no cloud signaling messages or file bytes in this helper.
+5. Wait for all three received files to show **校验通过，点击保存**; click Save and independently compare the saved SHA-256 values to the original files. Each browser's **诊断 → 复制诊断** includes, **only in QA mode**, `qa.receiveWindows[].firstByteAfterTriggerMs` and `lastByteAfterTriggerMs`: offsets from that device's *received P2P start notification* to real `file-start`/`file-end` controls. Compare the three intervals: `max(starts) < min(ends)` suggests actual overlap. P2P control arrival latency and OS scheduling make these offsets **approximate**, not a precise synchronized clock measurement. If file bytes finish before overlap is observable, use modestly larger files only when devices have enough memory.
+6. If a device does not start, inspect whether it was armed and whether its peer was still file-ready; keep the room open and copy the **ordinary (not `?debug=1`) diagnostic** from the affected two endpoints. If results are missing or timing windows do not overlap, record **pending**, not passed.
+
+**Safety:** The QA receiver must be locally armed; the coordinator cannot choose or read files from remote devices. The test trigger itself carries only `kind` and a fixed countdown, no filenames, file bytes, credentials, or addresses. The normal per-receiver queue, SHA-256 and current selected-path safety checks remain in force. The fixed 32 MiB cap is removed for experiments, but whole-file buffering can fail on mobile; 64/32/128 MiB must not be advertised as proven size support.
+
 ## Run automated tests
 
 ```bash
