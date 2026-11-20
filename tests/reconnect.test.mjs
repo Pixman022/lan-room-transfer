@@ -9,7 +9,7 @@ const appSource = readFileSync(new URL('../public/app.js', import.meta.url), 'ut
   .split('\n').filter(line => !line.startsWith('import ')).join('\n');
 
 // Exercise the real room controller against DOM/WebSocket stubs, without network access.
-function harness({debug = false, realRoutePolicy = false, realChecksum = false} = {}) {
+function harness({debug = false, realRoutePolicy = false, realChecksum = false, qa = false} = {}) {
   const debugMessages = [];
   const savedBlobs = [];
   const testConsole = {
@@ -100,8 +100,9 @@ function harness({debug = false, realRoutePolicy = false, realChecksum = false} 
     sessionStorage,
     location: {
       protocol: 'https:', host: 'test.example',
-      search: debug ? '?debug=1' : '',
-      href: debug ? 'https://test.example/?debug=1' : 'https://test.example/',
+      search: debug ? '?debug=1' : qa ? '?qa=1' : '',
+      href: debug ? 'https://test.example/?debug=1'
+        : qa ? 'https://test.example/?qa=1' : 'https://test.example/',
     },
     WebSocket: FakeWebSocket,
     RTCPeerConnection: FakeRTCPeerConnection,
@@ -432,6 +433,124 @@ test('three peers: concurrent independent receivers and a second uploader never 
   assert.equal(clients.A.state.peers.get('B').transferEvents['request-file:received'],1);
   assert.equal(clients.A.state.peers.get('C').transferEvents['request-file:received'],3);
   assert.equal(clients.B.state.peers.get('A').transferEvents['request-file:received'],1);
+});
+
+test('MULTI-03 QA: three locally armed browsers start their existing receive jobs from one P2P trigger', async () => {
+  const clients={};
+  for (const id of ['A','B','C']) {
+    clients[id]=harness({qa:true,realChecksum:true});
+    clients[id].run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+    await join(clients[id],clients[id].FakeWebSocket.sockets[0]);
+    assert.equal(clients[id].run('QA_MODE'),true);
+  }
+  async function link(leftId,rightId) {
+    const left=clients[leftId],right=clients[rightId];
+    await left.run(`createPeer("${rightId}","${rightId}",true,"gen-${rightId}",3)`);
+    await right.run(`createPeer("${leftId}","${leftId}",false,"gen-${leftId}",3)`);
+    const l=left.state.peers.get(rightId),r=right.state.peers.get(leftId);
+    const channel={label:'room-files',ordered:true,readyState:'open',bufferedAmount:0,send(){}};
+    r.pc.ondatachannel({channel});
+    l.channel.readyState='open';l.channel.bufferedAmount=0;
+    for (const peer of [l,r]) {
+      peer.ready=true;peer.verified=true;peer.remoteReady=true;
+      peer.pc.connectionState='connected';peer.pc.iceConnectionState='connected';
+    }
+    l.channel.send=data=>setImmediate(()=>channel.onmessage({data}));
+    channel.send=data=>setImmediate(()=>l.channel.onmessage({data}));
+  }
+  await link('A','B');
+  await link('A','C');
+  const sourceA=new Blob([new Uint8Array(1024*256+17).fill(49)]);
+  const sourceB=new Blob([new Uint8Array(1024*128+13).fill(82)]);
+  function publish(t,offerId,fileId,name,blob) {
+    t.state.outbound.set(offerId,new Map([[fileId,blob]]));
+    t.state.ownOffers.push({offerId,files:[{id:fileId,name,size:blob.size}]});
+    t.run('for(const peer of state.peers.values()) syncSharedOffers(peer)');
+  }
+  publish(clients.A,'offer-a','a1','A_main.bin',sourceA);
+  publish(clients.B,'offer-b','b1','B_reply.bin',sourceB);
+  await flushUntil(()=>clients.B.state.offers.has('A:offer-a') &&
+    clients.C.state.offers.has('A:offer-a') && clients.A.state.offers.has('B:offer-b'));
+
+  // Three independent opt-ins, no global remote file selection or upload.
+  for (const [id,selection] of [
+    ['A','B:offer-b:b1'],['B','A:offer-a:a1'],['C','A:offer-a:a1'],
+  ]) {
+    const t=clients[id];
+    t.elements.get('qa-file').value=selection;
+    assert.equal(t.run('qaArmSelected()'),true,'user must explicitly arm a local receive');
+  }
+  assert.equal(clients.A.run('qaStartAll()'),true,'one click from coordinator A');
+  await flushUntil(()=>['A','B','C'].every(id=>clients[id].run('qaTimer !== null')));
+  for (const id of ['A','B','C']) {
+    assert.equal(clients[id].state.jobs.length,0,'no receive before common countdown');
+    const t=clients[id];
+    const qaTimerId=t.run('qaTimer');
+    const timer=t.timers.get(qaTimerId);
+    assert.equal(timer.ms,6000,'same short wait on all devices');
+    t.timers.delete(qaTimerId);
+    timer.cb();
+  }
+  await flushUntil(()=>['A','B','C'].every(id=>
+    clients[id].state.jobs[0]?.status==='校验通过，点击保存'),6000);
+  assert.equal(await realSha256Hex(clients.A.savedBlobs[0]),await realSha256Hex(sourceB));
+  for (const id of ['B','C']) {
+    assert.equal(await realSha256Hex(clients[id].savedBlobs[0]),await realSha256Hex(sourceA));
+  }
+  for (const id of ['A','B','C']) {
+    const report=clients[id].run('diagnosticsSnapshot()');
+    assert.equal(report.qa.enabled,true);
+    assert.equal(report.qa.armed,false);
+    assert.equal(report.qa.triggered,true);
+    assert.equal(report.qa.receiveWindows.length,1);
+    assert.equal(report.qa.receiveWindows[0].sizeBytes,
+      id==='A'?sourceB.size:sourceA.size);
+    assert.ok(report.qa.receiveWindows[0].firstByteAfterTriggerMs!==null);
+    assert.ok(report.qa.receiveWindows[0].lastByteAfterTriggerMs!==null);
+    assert.ok(!JSON.stringify(report).includes('A_main.bin'),'ordinary QA diagnostics redact filenames');
+    assert.ok(!JSON.stringify(report).includes('B_reply.bin'));
+    assert.ok(clients[id].FakeWebSocket.sockets[0].sent.every(m=>m.type!=='qa-start'),
+      'QA start travels on P2P DataChannel, never via cloud signaling');
+  }
+});
+
+test('MULTI-03 QA: unarmed, non-QA, stale and duplicate P2P start controls never queue a file', async () => {
+  const normal=await linkedFilePeers();
+  normal.a.channel.send=()=>{};
+  const sender=normal.sender, receiver=normal.receiver;
+  await receiver.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"qa-start",delayMs:6000}))');
+  assert.equal(receiver.state.jobs.length,0);
+  assert.equal(receiver.run('QA_MODE'),false);
+  assert.equal(receiver.run('qaTimer'),null);
+
+  const qa=harness({qa:true});
+  qa.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(qa,qa.FakeWebSocket.sockets[0]);
+  await qa.run('createPeer("sender","Desktop",true,"gen-sender")');
+  const peer=qa.state.peers.get('sender');
+  peer.channel.readyState='open';peer.ready=true;peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  qa.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',
+    files:[{id:'f1',name:'test.bin',size:5,status:'pending'}]});
+  await qa.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"qa-start",delayMs:6000}))');
+  assert.equal(qa.run('qaTimer'),null,'unarmed peer cannot start transfers');
+  qa.elements.get('qa-file').value='sender:offer-a:f1';
+  assert.equal(qa.run('qaArmSelected()'),true);
+  await qa.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"qa-start",delayMs:1000}))');
+  assert.equal(qa.run('qaTimer'),null,'invalid countdown ignored');
+  peer.ready=false;
+  await qa.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"qa-start",delayMs:6000}))');
+  assert.equal(qa.run('qaTimer'),null,'revoked peer gate prevents start');
+  peer.ready=true;
+  await qa.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"qa-start",delayMs:6000}))');
+  const originalTimer=qa.run('qaTimer');
+  assert.ok(qa.timers.has(originalTimer));
+  await qa.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"qa-start",delayMs:6000}))');
+  assert.equal(qa.run('qaTimer'),originalTimer,'duplicate must not schedule again');
+  qa.run('document.getElementById("leave-room").onclick()');
+  assert.equal(qa.run('qaTimer'),null,'Leave cancels an armed countdown');
+  assert.equal(qa.timers.has(originalTimer),false);
+  assert.equal(qa.state.jobs.length,0);
 });
 
 function goodPathStats(remoteType='host') {
