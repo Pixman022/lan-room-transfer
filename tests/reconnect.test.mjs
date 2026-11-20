@@ -184,6 +184,45 @@ async function flushUntil(predicate, maxMs=2000) {
   assert.fail('file-transfer condition was not reached within the test deadline');
 }
 
+test('shared catalog missed before reciprocal P2P ready is replayed after receiver verification', async () => {
+  const t=await linkedFilePeers();
+  const source=new Blob(['catalog should arrive after security verification']);
+  t.sender.state.outbound.set('offer-early',new Map([['f1',source]]));
+  t.sender.state.ownOffers.push({offerId:'offer-early',files:[
+    {id:'f1',name:'test.txt',size:source.size}
+  ]});
+  // The uploader considers this link P2P-ready before the receiving browser
+  // has finished validating its own route, which can happen in real devices.
+  t.b.ready=false;
+  t.b.verified=false;
+  t.b.remoteReady=false;
+  t.sender.run('syncSharedOffers(state.peers.get("receiver"))');
+  await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='file-list'));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(t.receiver.state.offers.size,0,'unverified receiver must not expose the catalog');
+  assert.ok(t.a.syncedOffers.has('offer-early'),'sender already considers catalog delivered');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogsIgnoredBeforeReady'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().localSharedFiles'),1);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().visibleRemoteFiles'),0);
+
+  await t.receiver.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"ready",hostHostVerified:true}))');
+  await flushUntil(()=>t.b.ready===true);
+  await flushUntil(()=>t.receiver.state.offers.has('sender:offer-early'));
+  assert.equal(t.receiver.state.offers.get('sender:offer-early').files[0].name,'test.txt');
+  assert.equal(t.receiver.state.offers.size,1,'replay must not create duplicate offers');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().visibleRemoteFiles'),1);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsSent'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsReceived'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogsSent'),2);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogsReceived'),2);
+  await t.sender.run('receiveChannel(state.peers.get("receiver"),JSON.stringify({kind:"file-list-request"}))');
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogsSent'),2,
+    'repeated catalog requests do not amplify file metadata transfers');
+  assert.ok(!JSON.stringify(t.receiver.run('diagnosticsSnapshot()')).includes('test.txt'),
+    'ordinary catalog diagnostics never reveal the filename');
+});
+
 test('receive queue transfers multiple batches serially with real SHA-256, including an empty file', async () => {
   const t=await linkedFilePeers();
   const big=new Blob([new Uint8Array(40001).fill(91)]);
@@ -1436,7 +1475,7 @@ test('early remote ready is accepted after local path verification and local rea
   assert.equal(peer.ready,true);
   assert.notEqual(t.run('diagnosticsSnapshot().peers[0].timeToReadySeconds'),null);
   assert.equal(t.timers.size,0);
-  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.deepEqual(channel.sent,[{kind:'ready'},{kind:'file-list-request'}]);
 });
 
 test('phone selected host/prflx is gated until PC ready then completes reciprocal handshake', async () => {
@@ -1477,7 +1516,7 @@ test('phone selected host/prflx is gated until PC ready then completes reciproca
   assert.equal(peer.localReadySent,true);
   assert.equal(peer.ready,true);
   assert.equal(peer.routeInfo.code,'masked-host-prflx-p2p');
-  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.deepEqual(channel.sent,[{kind:'ready'},{kind:'file-list-request'}]);
   assert.equal(t.run('diagnosticsSnapshot().peers[0].canTransfer'),true);
   assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,true,
     'transfer-time recheck must use same approved path policy');
@@ -1550,7 +1589,7 @@ test('fully masked host/prflx stays blocked for legacy ready, then unlocks after
   assert.equal(peer.localReadySent,true);
   assert.equal(peer.ready,true);
   assert.equal(peer.routeInfo.code,'masked-host-prflx-reciprocal-p2p');
-  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.deepEqual(channel.sent,[{kind:'ready'},{kind:'file-list-request'}]);
   assert.equal(t.run('diagnosticsSnapshot().peers[0].remoteHostPairVerified'),true);
   assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,true);
   stats.get('r').candidateType='relay';
