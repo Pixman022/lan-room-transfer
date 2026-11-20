@@ -64,7 +64,7 @@ if (FULL_DEBUG) {
 const state = {
   ws: null, code: '', id: '', token: '', generation: '', leaving: false, peers: new Map(),
   outbound: new Map(), ownOffers: [], offers: new Map(), jobs: [], queue: [], active: null,
-  signalErrors: 0, lastSignalError: '',
+  signalErrors: 0, lastSignalError: '', lastRoomEntry: null,
 };
 
 let currentDeviceName;
@@ -291,6 +291,11 @@ async function handleServer(msg) {
       break;
     case 'welcome': {
       const restored = Boolean(state.code);
+      const rememberedSession = remembered();
+      const previousId = state.code === msg.code && state.id ? state.id
+        : rememberedSession?.code === msg.code ? rememberedSession.id : null;
+      state.lastRoomEntry = msg.created === true ? 'created'
+        : previousId && previousId === msg.id ? 'resumed' : 'joined';
       stopReconnect();
       reconnectAttempts = 0;
       state.code = msg.code; state.id = msg.id; state.token = msg.token; state.generation = msg.generation;
@@ -1115,6 +1120,7 @@ function diagnosticsSnapshot() {
     signalErrors: state.signalErrors,
     lastSignalError: state.lastSignalError,
     peerCount: state.peers.size,
+    roomEntry: state.lastRoomEntry,
     localSharedFiles: state.ownOffers.reduce((n, offer) => n + offer.files.length, 0),
     visibleRemoteFiles: [...state.offers.values()].reduce((n, offer) => n + offer.files.length, 0),
     peers: [...state.peers.values()].map((peer, index) => ({
@@ -1509,7 +1515,7 @@ $('leave-room').onclick = () => {
   state.ws?.close(); state.ws = null;
   for (const peer of state.peers.values()) { clearTimeout(peer.connectTimer); peer.pc.close(); }
   state.peers.clear();
-  state.code = ''; state.generation = '';
+  state.code = ''; state.generation = ''; state.lastRoomEntry = null;
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };
 $('copy-code').onclick = async () => { try { await navigator.clipboard.writeText(state.code); feedback('房间码已复制'); } catch { feedback(`房间码：${state.code}`); } };
