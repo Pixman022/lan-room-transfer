@@ -2272,7 +2272,7 @@ test('copy and real device rename show one replaceable success toast that auto-h
   assert.equal(t.run('window.__copied'), 'ROOM42');
   assert.equal(t.elements.get('toast').hidden, false);
   assert.equal(t.elements.get('toast-message').textContent, '房间号已复制');
-  assert.equal(t.elements.get('feedback').textContent, '', 'success does not overwrite permanent feedback');
+  assert.equal(t.run("document.getElementById('feedback').textContent"), '', 'success does not overwrite permanent feedback');
   const copyTimer = t.run('toastTimer');
   assert.equal(t.timers.get(copyTimer).ms, 2400);
 
@@ -2306,7 +2306,7 @@ test('clipboard failure keeps room-code fallback without a success toast', async
   t.state.code = 'ROOM42';
   await t.elements.get('copy-code').onclick();
   assert.equal(t.elements.get('feedback').textContent, '房间码：ROOM42');
-  assert.equal(t.elements.get('toast-message').textContent, '');
+  assert.equal(t.run("document.getElementById('toast-message').textContent"), '');
   assert.equal(t.run('toastTimer'), null);
 });
 
