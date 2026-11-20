@@ -25,6 +25,12 @@ const signalHealth = { sent: 0, acksReceived: 0, timeouts: 0, disconnects: 0, re
   lastDisconnect: null };
 const TRANSFER_IDLE_MS = 30000;
 const FULL_DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search || '');
+const QA_MODE = /(?:^|[?&])qa=1(?:&|$)/.test(location.search || '');
+const QA_START_DELAY_MS = 6000;
+let qaArmed = null;
+let qaTimer = null;
+let qaTriggerAt = null;
+let qaLastOutcome = '未开始';
 const debugStartedAt = Date.now();
 const debugEvents = [];
 const $ = id => document.getElementById(id);
@@ -283,6 +289,7 @@ function connect(action) {
     }
     signalHealth.disconnects += 1;
     state.ws = null;
+    qaCancelPlan();
     const wasJoined = Boolean(state.code);
     state.generation = '';
     const oldPeers = [...state.peers.values()];
@@ -405,6 +412,7 @@ function dropPeer(id, generation) {
   const peer = state.peers.get(id);
   if (!peer || (generation && peer.generation !== generation)) return false;
   tracePeer(peer, 'peer.dropped');
+  if (qaArmed?.peerId === id) qaCancelPlan();
   clearTimeout(peer.connectTimer);
   state.peers.delete(id);
   peer.pc.close();
@@ -912,6 +920,10 @@ async function receiveChannel(peer, data) {
     }
   } else if (msg.kind === 'route-proof') {
     peer.remoteHostPairVerified = msg.hostHostVerified === true;
+  } else if (msg.kind === 'qa-start') {
+    // Only a locally armed QA page can react. This encrypted P2P control
+    // carries no file selection, bytes, room credentials or signaling data.
+    if (QA_MODE && msg.delayMs === QA_START_DELAY_MS) qaScheduleStart();
   } else if (msg.kind === 'file-list-request') {
     // The legacy first-ready request is replayed once. Subsequent requests
     // are permitted only with a strictly increasing per-peer recovery sequence.
@@ -964,6 +976,7 @@ async function receiveChannel(peer, data) {
     // A file-start already in transit must not undo a user's cancellation.
     if (job.cancelled) return;
     job.status = '传输中'; job.received = 0; job.chunks = [];
+    job.wireStartedAt = Date.now();
     armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时'); renderJobs();
   } else if (msg.kind === 'file-end') {
     const job = state.active;
@@ -975,6 +988,7 @@ async function receiveChannel(peer, data) {
     if (job.status !== '传输中') return;
     if (job.received !== job.size) { failActive('文件大小不匹配'); return; }
     if (!isSha256Hex(msg.sha256)) { failActive('发送端缺少有效校验值，请双方刷新后重试'); return; }
+    job.wireEndedAt = Date.now();
     job.status = '校验中';
     armJobTimer(job, TRANSFER_IDLE_MS, '文件校验超时');
     renderJobs();
@@ -1305,6 +1319,7 @@ function renderPeers() {
   updateConnectionSummary();
   renderDiagnostics();
   renderSentFiles();
+  qaRender();
 }
 function diagnosticsSnapshot() {
   return {
@@ -1321,6 +1336,19 @@ function diagnosticsSnapshot() {
     roomEntry: state.lastRoomEntry,
     localSharedFiles: state.ownOffers.reduce((n, offer) => n + offer.files.length, 0),
     visibleRemoteFiles: [...state.offers.values()].reduce((n, offer) => n + offer.files.length, 0),
+    ...(QA_MODE ? { qa: {
+      enabled: true, armed: Boolean(qaArmed), countdownPending: qaTimer !== null,
+      triggered: qaTriggerAt !== null, lastOutcome: qaLastOutcome,
+      // Relative time to the locally received P2P start notification;
+      // filename, member ID, room code and address are intentionally omitted.
+      receiveWindows: state.jobs.filter(job => job.qaTriggerAt !== undefined).slice(-6).map(job => ({
+        sizeBytes: job.size, status: job.status,
+        firstByteAfterTriggerMs: job.wireStartedAt === undefined ? null
+          : job.wireStartedAt - job.qaTriggerAt,
+        lastByteAfterTriggerMs: job.wireEndedAt === undefined ? null
+          : job.wireEndedAt - job.qaTriggerAt,
+      })),
+    }} : {}),
     peers: [...state.peers.values()].map((peer, index) => ({
       device: index + 1,
       connection: peer.pc?.connectionState ?? 'unknown',
@@ -1595,7 +1623,7 @@ function renderRequests() {
   const root = $('incoming-requests'); root.replaceChildren();
   const offers = [...state.offers.values()];
   $('request-count').textContent = `${offers.reduce((total, offer) => total + offer.files.length, 0)} 个文件`;
-  if (!offers.length) { root.append(elem('p', 'empty', '暂无文件')); return; }
+  if (!offers.length) { root.append(elem('p', 'empty', '暂无文件')); qaRender(); return; }
   for (const offer of offers) {
     const peer = state.peers.get(offer.peerId);
     const box = elem('div', 'request'); const top = elem('div', 'request-head');
@@ -1622,6 +1650,7 @@ function renderRequests() {
     }
     root.append(box);
   }
+  qaRender();
 }
 function renderJobs() {
   const root = $('transfer-jobs'); root.replaceChildren();
@@ -1714,6 +1743,7 @@ $('leave-room').onclick = () => {
   stopReconnect();
   stopSignalKeepalive();
   signalRecover = null;
+  qaCancelPlan();
   reconnectAttempts = 0;
   sessionStorage.removeItem('lan-room-session');
   for (const job of state.jobs) if (job.url) URL.revokeObjectURL(job.url);
