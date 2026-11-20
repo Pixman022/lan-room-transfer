@@ -102,8 +102,10 @@ with sync_playwright() as playwright:
         assert page.locator('.room-actions #copy-code').count() == 0
         assert page.locator('.room-actions button').count() == 1
         assert page.locator('.room-actions button').inner_text() == '退出'
+        # Clipboard is unavailable in this browser fixture: show the existing failure fallback.
         page.locator('#copy-code').click()
-        assert page.locator('#feedback').inner_text() in ('房间码已复制', '房间码：HOME2026')
+        assert page.locator('#feedback').inner_text() == '复制失败，房间号：HOME2026'
+        assert page.locator('#action-toast').is_hidden()
         assert page.locator('#peer-list .device-row').count() == 0
         assert page.locator('#drop-target').count() == 0
         assert page.locator('#peer-list button').count() == 0
@@ -217,6 +219,8 @@ with sync_playwright() as playwright:
         assert page.locator('#my-device-label').inner_text() == 'Peach Panda'
         assert page.locator('#home-device-label').inner_text() == 'Peach Panda'
         assert page.locator('#my-device-avatar').inner_text() == '🐼'
+        assert page.locator('#action-toast').is_visible()
+        assert page.locator('#action-toast').inner_text() == '设备名称已修改'
 
         # New uploads are announced to *all* connected devices, without a recipient selector.
         page.evaluate('''() => {
