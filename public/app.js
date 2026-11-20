@@ -107,6 +107,17 @@ function feedback(text, error = false) {
   $('feedback').textContent = text;
   $('feedback').className = error ? 'feedback error' : 'feedback';
 }
+let toastTimer = null;
+function showToast(message) {
+  const toast = $('action-toast');
+  if (toastTimer !== null) clearTimeout(toastTimer);
+  toast.textContent = message;
+  toast.hidden = false;
+  toastTimer = setTimeout(() => {
+    toast.hidden = true;
+    toastTimer = null;
+  }, 2200);
+}
 function setEntryLoading(loading) {
   $('enter-room').disabled = loading;
   $('enter-room').setAttribute('aria-busy', String(loading));
@@ -221,7 +232,7 @@ function finishDeviceNameEdit(labelId, cancel = false) {
   label.contentEditable = 'false';
   label.removeAttribute('role');
   label.removeAttribute('aria-label');
-  if (!cancel && saveDeviceName(nextName)) feedback('设备名称已保存');
+  if (!cancel && saveDeviceName(nextName)) showToast('设备名称已修改');
   updateDeviceAvatar();
 }
 function rememberRoom() {
@@ -1965,7 +1976,14 @@ $('leave-room').onclick = () => {
   setEntryLoading(false);
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };
-$('copy-code').onclick = async () => { try { await navigator.clipboard.writeText(state.code); feedback('房间码已复制'); } catch { feedback(`房间码：${state.code}`); } };
+$('copy-code').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(state.code);
+    showToast('房间号已复制');
+  } catch {
+    feedback(`复制失败，房间号：${state.code}`, true);
+  }
+};
 $('drop-zone').addEventListener('click', () => {
   const picker = $('send-files');
   picker.value = '';
