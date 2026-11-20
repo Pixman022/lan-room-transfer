@@ -216,6 +216,9 @@ test('shared catalog missed before reciprocal P2P ready is replayed after receiv
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsReceived'),1);
   assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogsSent'),2);
   assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogsReceived'),2);
+  await t.sender.run('receiveChannel(state.peers.get("receiver"),JSON.stringify({kind:"file-list-request"}))');
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogsSent'),2,
+    'repeated catalog requests do not amplify file metadata transfers');
   assert.ok(!JSON.stringify(t.receiver.run('diagnosticsSnapshot()')).includes('test.txt'),
     'ordinary catalog diagnostics never reveal the filename');
 });
