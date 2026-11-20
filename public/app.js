@@ -11,6 +11,8 @@ const MAX_FILES = 20;
 const PEER_CONNECT_TIMEOUT_MS = 15000;
 const PEER_PRIMARY_ATTEMPTS = 2;
 const PEER_MAX_ATTEMPTS = 4;
+const READY_REANNOUNCE_MAX = 2;
+const READY_REANNOUNCE_DELAY_MS = 5000;
 const RECONNECT_MAX_DELAY_MS = 15000;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
@@ -383,6 +385,19 @@ function schedulePeerTimeout(peer, delay = PEER_CONNECT_TIMEOUT_MS) {
         tracePeer(peer, 'datachannel.ready.timeout', {
           localReadySent: peer.localReadySent, remoteReady: peer.remoteReady,
         });
+        // Recover a missed application ready without restarting healthy ICE.
+        // Re-attest the CURRENT selected path before each bounded P2P control.
+        if (peer.readyRetryAttempts < READY_REANNOUNCE_MAX) {
+          peer.readyRetryAttempts += 1;
+          void reannounceVerifiedReady(peer, true).finally(() => {
+            if (state.peers.get(peer.id) === peer && !peer.remoteReady &&
+                peer.channel?.readyState === 'open' &&
+                peer.pc.connectionState === 'connected' &&
+                peer.readyRetryAttempts < READY_REANNOUNCE_MAX) {
+              schedulePeerTimeout(peer, READY_REANNOUNCE_DELAY_MS);
+            }
+          });
+        }
         renderPeers();
       }
       return;
@@ -445,6 +460,7 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
     pc, channel: null, verified: false, remoteReady: false, remoteHostPairVerified: false, localReadySent: false,
+    readyRetryAttempts: 0, readyRetriesSent: 0, readyEchoesSent: 0, readyEchoAnswered: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(),
     catalogRequested: false, catalogReplayDone: false, routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
@@ -659,6 +675,34 @@ async function verifyPeerPath(peer) {
   renderPeers();
   return peer.verified;
 }
+// A ready packet is only reannounced over the existing DataChannel after
+// freshly verifying the currently selected P2P path. It never unlocks a file
+// transfer; the opposite endpoint must still supply its own ready packet.
+async function reannounceVerifiedReady(peer, requestReciprocal) {
+  if (state.peers.get(peer.id) !== peer || !peer.verified || !peer.localReadySent ||
+      peer.channel?.readyState !== 'open' || peer.pc.connectionState !== 'connected' ||
+      peer.pc.iceConnectionState === 'failed' || (requestReciprocal && peer.remoteReady)) return false;
+  let verdict;
+  try { verdict = await inspectPeerPath(peer); }
+  catch { return false; }
+  if (!verdict?.allowed || state.peers.get(peer.id) !== peer ||
+      peer.channel?.readyState !== 'open' || peer.pc.connectionState !== 'connected' ||
+      peer.pc.iceConnectionState === 'failed' || (requestReciprocal && peer.remoteReady)) return false;
+  try {
+    peer.channel.send(JSON.stringify({
+      kind: 'ready',
+      ...(verdict.hostHostVerified ? { hostHostVerified: true } : {}),
+      ...(requestReciprocal ? { requestReciprocal: true } : {}),
+    }));
+    if (requestReciprocal) peer.readyRetriesSent += 1;
+    else peer.readyEchoesSent += 1;
+    tracePeer(peer, 'datachannel.ready.reannounced', { requestReciprocal });
+    return true;
+  } catch (err) {
+    tracePeer(peer, 'datachannel.ready.reannounce.failed', { error: String(err) });
+    return false;
+  }
+}
 function attachChannel(peer, channel) {
   peer.channel = channel;
   channel.binaryType = 'arraybuffer';
@@ -718,6 +762,12 @@ async function receiveChannel(peer, data) {
     // even if the regular onopen polling window has already elapsed.
     if (!peer.verified && peer.channel?.readyState === 'open') {
       void verifyPeerPath(peer);
+    } else if (msg.requestReciprocal === true && peer.localReadySent &&
+               !peer.readyEchoAnswered) {
+      // A peer may have missed our initial ready. Reply at most once, after
+      // freshly checking our selected path; never echo an echo.
+      peer.readyEchoAnswered = true;
+      void reannounceVerifiedReady(peer, false);
     }
     if (peer.ready) {
       peer.reason = '文件直连就绪';
@@ -1139,6 +1189,9 @@ function diagnosticsSnapshot() {
       routeVerified: Boolean(peer.verified),
       localReadySent: Boolean(peer.localReadySent),
       peerVerified: Boolean(peer.remoteReady),
+      readyRetryAttempts: peer.readyRetryAttempts || 0,
+      readyRetriesSent: peer.readyRetriesSent || 0,
+      readyEchoesSent: peer.readyEchoesSent || 0,
       remoteHostPairVerified: Boolean(peer.remoteHostPairVerified),
       route: peer.routeInfo,
       stage: peer.stage || 'unknown',
