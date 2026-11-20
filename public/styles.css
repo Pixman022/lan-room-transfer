@@ -73,6 +73,9 @@ main { min-height: calc(100vh - 76px); }
 .room-code-editor input { flex: 1; font-size: 18px; font-weight: 660; letter-spacing: .045em; }
 .room-code-editor button { width: 49px; padding: 0; font-size: 24px; }
 .entry-panel .primary { padding: 15px 16px; font-size: 15px; display: flex; justify-content: center; gap: 12px; }
+.entry-loading-spinner { width: 17px; height: 17px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: entry-spin .8s linear infinite; }
+@keyframes entry-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .entry-loading-spinner { animation-duration: 2s; } }
 
 /* Room heading and identity */
 .room-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 28px 0 10px; }
