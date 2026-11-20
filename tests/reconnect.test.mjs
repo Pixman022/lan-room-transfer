@@ -202,12 +202,22 @@ test('shared catalog missed before reciprocal P2P ready is replayed after receiv
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(t.receiver.state.offers.size,0,'unverified receiver must not expose the catalog');
   assert.ok(t.a.syncedOffers.has('offer-early'),'sender already considers catalog delivered');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogsIgnoredBeforeReady'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().localSharedFiles'),1);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().visibleRemoteFiles'),0);
 
   await t.receiver.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"ready",hostHostVerified:true}))');
   await flushUntil(()=>t.b.ready===true);
   await flushUntil(()=>t.receiver.state.offers.has('sender:offer-early'));
   assert.equal(t.receiver.state.offers.get('sender:offer-early').files[0].name,'test.txt');
   assert.equal(t.receiver.state.offers.size,1,'replay must not create duplicate offers');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().visibleRemoteFiles'),1);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsSent'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsReceived'),1);
+  assert.equal(t.sender.run('diagnosticsSnapshot().peers[0].transfer.catalogsSent'),2);
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogsReceived'),2);
+  assert.ok(!JSON.stringify(t.receiver.run('diagnosticsSnapshot()')).includes('test.txt'),
+    'ordinary catalog diagnostics never reveal the filename');
 });
 
 test('receive queue transfers multiple batches serially with real SHA-256, including an empty file', async () => {
