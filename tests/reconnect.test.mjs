@@ -298,6 +298,11 @@ test('MULTI-03: a P2P link returning to connected cannot restore file transport 
     'no refresh over a denied selected route');
   assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRefreshRequestsSent'),0);
   assert.notEqual(t.b.reason,'文件直连就绪');
+  // A late duplicate ready is NOT a new local selected-path approval.
+  await t.receiver.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"ready",hostHostVerified:true}))');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(t.b.ready,false,'duplicate peer ready must not bypass unsafe recovery checks');
+  assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRefreshRequestsSent'),0);
 });
 
 test('receive queue transfers multiple batches serially with real SHA-256, including an empty file', async () => {
