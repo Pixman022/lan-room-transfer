@@ -134,8 +134,10 @@ function updateConnectionSummary() {
   }
   const peers = [...state.peers.values()];
   const ready = peers.filter(peer => peer.ready).length;
-  status.textContent = ready ? '文件直连就绪' : peers.length ? '直连未就绪' : '房间已连接';
-  status.dataset.state = ready ? 'ready' : 'waiting';
+  status.textContent = !peers.length ? '房间已连接'
+    : ready === peers.length ? '文件直连就绪'
+      : ready ? '部分设备已连接' : '直连未就绪';
+  status.dataset.state = !peers.length ? 'room' : ready === peers.length ? 'ready' : 'waiting';
 }
 function sendSignal(to, signal) {
   const peer = state.peers.get(to);
