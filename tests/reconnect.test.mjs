@@ -435,6 +435,23 @@ test('three peers: concurrent independent receivers and a second uploader never 
   assert.equal(clients.B.state.peers.get('A').transferEvents['request-file:received'],1);
 });
 
+test('QA entry is visible from a normal room, opens the local test panel and enables QA diagnostics', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  assert.equal(t.run('QA_MODE'),false,'regular rooms stay in normal mode until explicitly enabled');
+  assert.equal(t.elements.get('qa-panel').hidden,true);
+  assert.notEqual(t.elements.get('qa-enable').hidden,true,'room has a discoverable QA entry');
+  assert.equal(Object.hasOwn(t.run('diagnosticsSnapshot()'),'qa'),false);
+  t.run('document.getElementById("qa-enable").onclick()');
+  assert.equal(t.run('QA_MODE'),true);
+  assert.equal(t.elements.get('qa-panel').hidden,false,'one click exposes the QA panel');
+  assert.equal(t.elements.get('qa-enable').hidden,true,'the entry is hidden once activated');
+  assert.equal(t.run('diagnosticsSnapshot().qa.enabled'),true);
+  assert.equal(t.run('diagnosticsSnapshot().qa.armed'),false);
+  assert.equal(t.state.jobs.length,0,'enabling QA never starts a receive without arming');
+});
+
 test('MULTI-03 QA: three locally armed browsers start their existing receive jobs from one P2P trigger', async () => {
   const clients={};
   for (const id of ['A','B','C']) {
@@ -444,6 +461,8 @@ test('MULTI-03 QA: three locally armed browsers start their existing receive job
     assert.equal(clients[id].run('QA_MODE'),true);
     assert.equal(clients[id].elements.get('qa-panel').hidden,false,
       'QA controls appear only when explicitly enabled');
+    assert.equal(clients[id].elements.get('qa-enable').hidden,true,
+      'URL enabled QA should not show another entry');
   }
   async function link(leftId,rightId) {
     const left=clients[leftId],right=clients[rightId];
