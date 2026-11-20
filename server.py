@@ -37,6 +37,7 @@ class Room:
     code: str
     created_at: float
     members: dict[str, Member] = field(default_factory=dict)
+
     def online(self):
         return [member for member in self.members.values() if member.ws is not None and not member.ws.closed]
 
