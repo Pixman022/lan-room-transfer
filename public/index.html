@@ -45,10 +45,17 @@
       <div class="room-heading">
         <div class="room-heading-copy">
           <p class="tiny-label">房间</p>
-          <div class="room-title-line"><h1 id="room-name">—</h1><span class="chip ready">在线</span></div>
+          <div class="room-title-line">
+            <h1 id="room-name">—</h1>
+            <button id="copy-code" class="copy-room-code" type="button" aria-label="复制房间号" title="复制房间号">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="8" y="8" width="12" height="12" rx="2"/>
+                <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>
+              </svg>
+            </button>
+          </div>
         </div>
         <div class="room-actions">
-          <button id="copy-code" class="secondary" type="button">复制房间码</button>
           <button id="leave-room" class="quiet-button" type="button">退出</button>
         </div>
       </div>

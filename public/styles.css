@@ -85,8 +85,11 @@ main { min-height: calc(100vh - 76px); }
 
 /* Room heading and identity */
 .room-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 28px 0 10px; }
-.room-title-line { display: flex; align-items: center; gap: 11px; }
-.room-title-line h1 { font-size: clamp(24px, 3vw, 33px); letter-spacing: -.045em; margin: 0; line-height: 1.25; overflow-wrap: anywhere; }
+.room-heading-copy { min-width: 0; }
+.room-title-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.room-title-line h1 { min-width: 0; font-size: clamp(24px, 3vw, 33px); letter-spacing: -.045em; margin: 0; line-height: 1.25; overflow-wrap: anywhere; }
+.copy-room-code { display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; padding: 0; border-radius: 9px; background: transparent; color: var(--muted); }
+.copy-room-code:hover { background: var(--tint-blue); color: var(--tint-blue-ink); }
 .chip { background: var(--tint-blue); color: var(--tint-blue-ink); border-radius: 99px; white-space: nowrap; font-size: 11px; padding: 4px 9px; }
 .chip.ready { background: var(--tint-blue); color: var(--tint-blue-ink); }
 .chip.failed { background: #fcecea; color: var(--danger); }

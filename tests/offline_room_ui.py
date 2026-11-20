@@ -72,6 +72,15 @@ with sync_playwright() as playwright:
             document.getElementById('my-device-label').textContent = 'Coral Fox';
             d.renderPeers();
         }''')
+        # The room title owns its copy icon; no redundant online badge or toolbar copy action.
+        assert page.locator('.room-title-line #copy-code').count() == 1
+        assert page.locator('#copy-code').get_attribute('aria-label') == '复制房间号'
+        assert page.locator('.room-title-line .chip').count() == 0
+        assert page.locator('.room-actions #copy-code').count() == 0
+        assert page.locator('.room-actions button').count() == 1
+        assert page.locator('.room-actions button').inner_text() == '退出'
+        page.locator('#copy-code').click()
+        assert page.locator('#feedback').inner_text() in ('房间码已复制', '房间码：HOME2026')
         assert page.locator('#peer-list .device-row').count() == 0
         assert page.locator('#drop-target').count() == 0
         assert page.locator('#peer-list button').count() == 0
