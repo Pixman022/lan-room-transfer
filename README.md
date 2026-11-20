@@ -54,8 +54,9 @@ For actual two-device testing, deploy the app + signalling server behind a **tru
 
 ## Optional coordinated three-device QA test (hidden in normal mode)
 
-To test **real concurrent file bytes with one human operating A/B/C**, use the explicitly opt-in URL
-`https://lan-room-transfer.onrender.com/?qa=1` **on all three browsers**. The normal URL never shows this panel. This is a local test aid, not an automatic transfer feature or a new product flow.
+To test **real concurrent file bytes with one human operating A/B/C**, open the normal
+`https://lan-room-transfer.onrender.com/` on all three browsers and click **并发验收** in each room's **在线设备** toolbar. The **并发验收 · 同步接收** panel opens near the top of the room. Alternatively the explicitly opt-in URL
+`https://lan-room-transfer.onrender.com/?qa=1` opens the same panel directly. Ordinary browsing never starts a transfer automatically: activating the panel is a local opt-in, followed by explicit file selection and **准备接收**. This is a temporary QA aid, not the normal product transfer flow.
 
 1. A, B and C enter the **same room**, and verify A↔B and A↔C have `canTransfer:true` in ordinary diagnostics. Keep all three tabs **foreground**: mobile/browser background throttling can delay timers.
 2. **Before starting:** A shares `A_primary_64MiB.bin` or a smaller test file; B shares `B_reply_32MiB.bin` or a smaller test file. B and C must see A's file; A must see B's file.
