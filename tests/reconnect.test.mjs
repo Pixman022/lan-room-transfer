@@ -509,6 +509,9 @@ test('MULTI-03 QA: three locally armed browsers start their existing receive job
       id==='A'?sourceB.size:sourceA.size);
     assert.ok(report.qa.receiveWindows[0].firstByteAfterTriggerMs!==null);
     assert.ok(report.qa.receiveWindows[0].lastByteAfterTriggerMs!==null);
+    assert.ok(report.qa.receiveWindows[0].lastByteAfterTriggerMs >=
+      report.qa.receiveWindows[0].firstByteAfterTriggerMs,
+      'timestamps cover accepted P2P binary chunks');
     assert.ok(!JSON.stringify(report).includes('A_main.bin'),'ordinary QA diagnostics redact filenames');
     assert.ok(!JSON.stringify(report).includes('B_reply.bin'));
     assert.ok(clients[id].FakeWebSocket.sockets[0].sent.every(m=>m.type!=='qa-start'),
