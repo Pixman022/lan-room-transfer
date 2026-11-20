@@ -107,9 +107,17 @@ function feedback(text, error = false) {
   $('feedback').textContent = text;
   $('feedback').className = error ? 'feedback error' : 'feedback';
 }
+function setEntryLoading(loading) {
+  $('enter-room').disabled = loading;
+  $('enter-room').setAttribute('aria-busy', String(loading));
+  $('entry-loading-icon').hidden = !loading;
+  $('entry-button-arrow').hidden = loading;
+  $('entry-button-label').textContent = loading ? '正在连接房间…' : '进入房间';
+}
 function showRoom(visible) {
   $('room-screen').hidden = !visible;
   $('home-screen').hidden = visible;
+  if (visible) setEntryLoading(false);
   updateConnectionSummary();
 }
 function updateConnectionSummary() {
@@ -299,7 +307,8 @@ function scheduleReconnect(action) {
 function connect(action) {
   if (state.ws && state.ws.readyState < WebSocket.CLOSING) return;
   stopReconnect();
-  feedback(state.code ? '正在恢复房间连接…' : '正在连接协调服务…');
+  if (!state.code) setEntryLoading(true);
+  feedback(state.code ? '正在恢复房间连接…' : '正在连接房间…');
   state.leaving = false;
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${scheme}://${location.host}/ws`);
@@ -316,6 +325,7 @@ function connect(action) {
     state.ws = null;
     qaCancelPlan();
     const wasJoined = Boolean(state.code);
+    if (!wasJoined) setEntryLoading(false);
     state.generation = '';
     const oldPeers = [...state.peers.values()];
     state.peers.clear();
@@ -337,7 +347,7 @@ function connect(action) {
       showRoom(false);
       state.code = ''; state.ownOffers = []; state.outbound.clear();
     }
-    renderPeers(); renderRequests(); renderJobs(); renderSentFiles();
+    renderPeers(); renderRoomFiles(); renderSentFiles();
   };
   signalRecover = onDisconnected;
   ws.addEventListener('open', () => {
@@ -411,7 +421,7 @@ async function handleServer(msg) {
         ? '原房间已关闭，已使用原房间码创建新房间，正在重新建立 P2P 直连'
         : restored ? '房间连接已恢复，正在重建 P2P 直连' : '已进入房间，等待设备 P2P 直连');
       for (const other of msg.peers) await createPeer(other.id, other.name, true, other.generation);
-      renderPeers(); renderRequests(); renderJobs(); renderSentFiles(); break;
+      renderPeers(); renderRoomFiles(); renderSentFiles(); break;
     }
     case 'peer-online':
       if (msg.id !== state.id) await createPeer(msg.id, msg.name, false, msg.generation);
@@ -424,7 +434,7 @@ async function handleServer(msg) {
       break;
     case 'peer-name': {
       const peer = state.peers.get(msg.id);
-      if (peer) { peer.name = msg.name; renderPeers(); renderRequests(); }
+      if (peer) { peer.name = msg.name; renderPeers(); renderRoomFiles(); }
       break;
     }
     case 'signal':
@@ -443,7 +453,7 @@ function dropPeer(id, generation) {
   peer.pc.close();
   if (state.active?.peerId === id) failActive('发送设备已离线');
   discardPeerOffers(id);
-  renderPeers(); renderRequests(); renderJobs();
+  renderPeers(); renderRoomFiles();
   return true;
 }
 // Keep only bounded, redacted per-attempt outcomes. Browser IPs, SDP,
@@ -972,7 +982,7 @@ async function receiveChannel(peer, data) {
     if (state.offers.has(key)) return;
     state.offers.set(key, { peerId: peer.id, offerId: msg.offerId,
       files: msg.files.map(f => ({ id: f.id, name: f.name, size: f.size, status: 'pending' })) });
-    renderRequests();
+    renderRoomFiles();
     feedback(`${peer.name} 分享了 ${msg.files.length} 个文件`);
   } else if (msg.kind === 'file-withdraw') {
     if (typeof msg.offerId === 'string' && typeof msg.fileId === 'string') {
@@ -986,7 +996,7 @@ async function receiveChannel(peer, data) {
         job.fileId === msg.fileId && job.status === '等待发送端') {
       job.status = '发送端已响应，等待文件启动';
       armJobTimer(job, 20000, '发送端已响应，但未开始发送');
-      renderJobs();
+      renderRoomFiles();
     }
   } else if (msg.kind === 'cancel-file') {
     const sending = peer.sending.get(msg.fileId);
@@ -1001,7 +1011,7 @@ async function receiveChannel(peer, data) {
     // A file-start already in transit must not undo a user's cancellation.
     if (job.cancelled) return;
     job.status = '传输中'; job.received = 0; job.chunks = [];
-    armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时'); renderJobs();
+    armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时'); renderRoomFiles();
   } else if (msg.kind === 'file-end') {
     const job = state.active;
     if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId ||
@@ -1014,7 +1024,7 @@ async function receiveChannel(peer, data) {
     if (!isSha256Hex(msg.sha256)) { failActive('发送端缺少有效校验值，请双方刷新后重试'); return; }
     job.status = '校验中';
     armJobTimer(job, TRANSFER_IDLE_MS, '文件校验超时');
-    renderJobs();
+    renderRoomFiles();
     try {
       const blob = new Blob(job.chunks);
       const verified = await verifySha256(blob, msg.sha256);
@@ -1050,7 +1060,7 @@ function handleBinary(peer, data) {
   }
   job.received += data.byteLength;
   armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时');
-  renderJobs();
+  renderRoomFiles();
 }
 
 // During a transfer, a browser can briefly omit its selected ICE pair from
@@ -1165,14 +1175,14 @@ function acceptFile(offer, file) {
     name: file.name, size: file.size, received: 0, chunks: [], status: '排队中', url: null, cancelled: false };
   state.jobs.push(job);
   state.queue.push(job);
-  renderRequests(); renderJobs(); startNext();
+  renderRoomFiles(); startNext();
 }
 function startNext() {
   if (state.active || state.queue.length === 0) return;
   const job = state.queue.shift();
   const peer = state.peers.get(job.peerId);
   if (!peer?.ready) {
-    job.status = '失败：设备暂不可用'; renderJobs(); startNext(); return;
+    job.status = '失败：设备暂不可用'; renderRoomFiles(); startNext(); return;
   }
   state.active = job;
   job.status = '等待发送端';
@@ -1181,7 +1191,7 @@ function startNext() {
     failActive('文件请求发送失败');
     return;
   }
-  renderJobs();
+  renderRoomFiles();
 }
 function armJobTimer(job, delay, reason) {
   if (job.timer) clearTimeout(job.timer);
@@ -1199,7 +1209,7 @@ function finishJob(status) {
   if (file) file.status = status === '校验通过，点击保存' ? 'complete' : 'failed';
   job.chunks = [];
   state.active = null;
-  renderRequests(); renderJobs();
+  renderRoomFiles();
   queueMicrotask(startNext);
 }
 function failActive(reason) { if (state.active) finishJob(`失败：${reason}`); }
@@ -1215,14 +1225,14 @@ function cancelJob(job) {
     }
     state.peers.get(job.peerId) && sendPeer(state.peers.get(job.peerId), { kind: 'cancel-file', fileId: job.fileId });
     job.status = '正在取消';
-    renderJobs();
+    renderRoomFiles();
   } else if (state.queue.includes(job)) {
     state.queue.splice(state.queue.indexOf(job), 1);
     job.status = '已取消';
     const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
     const file = offer?.files.find(f => f.id === job.fileId);
     if (file) file.status = 'failed';
-    renderJobs(); renderRequests();
+    renderRoomFiles();
   }
 }
 function retryJob(job) {
@@ -1232,12 +1242,12 @@ function retryJob(job) {
   if (!file) {
     job.status = '已撤回';
     feedback('该文件已被撤回，无法重试', true);
-    renderJobs();
+    renderRoomFiles();
     return;
   }
   job.received = 0; job.chunks = []; job.cancelled = false; job.status = '排队中';
   file.status = 'queued';
-  state.queue.push(job); renderJobs(); renderRequests(); startNext();
+  state.queue.push(job); renderRoomFiles(); startNext();
 }
 
 // Deliberately opt-in diagnostic helper for one operator testing three devices.
@@ -1328,7 +1338,7 @@ function qaScheduleStart() {
       job.qaTriggerAt = qaTriggerAt;
     }
     qaLastOutcome = '已发起接收';
-    $('qa-status').textContent = '已同时发起接收；进度在下方传输列表，结束后复制普通诊断。';
+    $('qa-status').textContent = '已同时发起接收；进度在下方房间文件列表，结束后复制普通诊断。';
     qaRender();
   }, QA_START_DELAY_MS);
   $('qa-status').textContent = '已收到同步开始通知，6 秒后自动发起接收。请保持页面前台。';
@@ -1436,7 +1446,7 @@ function withdrawPeerFile(peerId, offerId, fileId) {
     }
   }
   state.queue = state.queue.filter(job => !(job.peerId === peerId && job.offerId === offerId && job.fileId === fileId));
-  renderRequests(); renderJobs();
+  renderRoomFiles();
 }
 function discardPeerOffers(peerId) {
   for (const [key, offer] of state.offers) {
@@ -1762,60 +1772,93 @@ function renderSentFiles() {
     container.append(line);
   }
 }
-function renderRequests() {
-  const root = $('incoming-requests'); root.replaceChildren();
+function renderRoomFiles() {
+  const root = $('incoming-requests');
+  root.replaceChildren();
   const offers = [...state.offers.values()];
-  $('request-count').textContent = `${offers.reduce((total, offer) => total + offer.files.length, 0)} 个文件`;
-  if (!offers.length) { root.append(elem('p', 'empty', '暂无文件')); qaRender(); return; }
+  const jobsByFile = new Map(state.jobs.map(job =>
+    [`${job.peerId}:${job.offerId}:${job.fileId}`, job]));
+  const shownJobs = new Set();
+  let count = 0;
+
+  function appendFileRow(container, file, offer, job) {
+    const row = elem('div', job ? 'file-row job-row' : 'file-row');
+    row.append(elem('div', 'file-icon', job ? '↓' : '↧'));
+    const info = elem('div', 'item-info');
+    info.append(elem('strong', '', file.name));
+    if (job) {
+      info.append(elem('span', '', `${job.status} · ${humanSize(job.received)} / ${humanSize(job.size)}`));
+      const progress = elem('div', 'progress');
+      const bar = elem('div');
+      bar.style.width = `${job.size ? Math.min(100, job.received / job.size * 100) : (job.url ? 100 : 0)}%`;
+      progress.append(bar);
+      info.append(progress);
+    } else {
+      info.append(elem('span', '', humanSize(file.size)));
+    }
+    row.append(info);
+    const actions = elem('div', 'job-actions');
+    if (!job && file.status === 'pending') {
+      const button = addButton(actions, '接收', () => acceptFile(offer, file));
+      button.disabled = !state.peers.get(offer.peerId)?.ready;
+    } else if (job?.url) {
+      const link = elem('a', 'download-link', '保存');
+      link.href = job.url;
+      link.download = job.name;
+      actions.append(link);
+    } else if (job && (state.active === job || state.queue.includes(job))) {
+      if (!job.cancelled) addButton(actions, '取消', () => cancelJob(job), 'secondary small-button');
+    } else if (job && (job.status.startsWith('失败') || job.status === '已取消')) {
+      addButton(actions, '重试', () => retryJob(job), 'secondary small-button');
+    } else if (!job) {
+      actions.append(elem('span', file.status === 'complete' ? 'chip ready' : 'chip',
+        ({ queued: '已加入队列', complete: '已接收', failed: '接收失败' })[file.status] || file.status));
+    }
+    row.append(actions);
+    container.append(row);
+  }
+
   for (const offer of offers) {
     const peer = state.peers.get(offer.peerId);
-    const box = elem('div', 'request'); const top = elem('div', 'request-head');
-    top.append(elem('strong', '', peer?.name ?? '已离线设备'), elem('small', '', `${offer.files.length} 个文件`));
-    box.append(top);
+    const group = elem('div', 'request');
+    const top = elem('div', 'request-head');
+    top.append(elem('strong', '', peer?.name ?? '已离线设备'),
+      elem('small', '', `${offer.files.length} 个文件`));
+    group.append(top);
     for (const file of offer.files) {
-      const line = elem('div', 'file-row'); line.append(elem('div', 'file-icon', '↧'));
-      const info = elem('div', 'item-info'); info.append(elem('strong', '', file.name), elem('span', '', humanSize(file.size)));
-      line.append(info);
-      if (file.status === 'pending') {
-        const button = addButton(line, '接收', () => acceptFile(offer, file));
-        button.disabled = !peer?.ready;
-      }
-      else line.append(elem('span', file.status === 'complete' ? 'chip ready' : 'chip',
-        ({ queued: '已加入队列', complete: '已接收', failed: '可在队列重试' })[file.status] || file.status));
-      box.append(line);
+      const job = jobsByFile.get(`${offer.peerId}:${offer.offerId}:${file.id}`);
+      if (job) shownJobs.add(job);
+      appendFileRow(group, file, offer, job);
+      count += 1;
     }
-    const pending = offer.files.filter(f => f.status === 'pending');
+    const pending = offer.files.filter(file => file.status === 'pending');
     if (pending.length) {
       const foot = elem('div', 'request-footer');
-      const button = addButton(foot, `接收全部 (${pending.length})`, () => pending.forEach(f => acceptFile(offer, f)), 'primary small-button');
+      const button = addButton(foot, `接收全部 (${pending.length})`,
+        () => pending.forEach(file => acceptFile(offer, file)), 'primary small-button');
       button.disabled = !peer?.ready;
-      box.append(foot);
+      group.append(foot);
     }
-    root.append(box);
+    root.append(group);
   }
+
+  // Keep locally saved files and terminated jobs available after a sender
+  // withdraws a file or leaves the room; never render the same job twice.
+  const olderJobs = state.jobs.filter(job => !shownJobs.has(job));
+  if (olderJobs.length) {
+    const group = elem('div', 'request');
+    const top = elem('div', 'request-head');
+    top.append(elem('strong', '', '已撤回或离线的文件'),
+      elem('small', '', `${olderJobs.length} 个文件`));
+    group.append(top);
+    for (const job of [...olderJobs].reverse()) appendFileRow(group, job, null, job);
+    root.append(group);
+    count += olderJobs.length;
+  }
+
+  $('request-count').textContent = `${count} 个文件`;
+  if (!count) root.append(elem('p', 'empty', '暂无文件'));
   qaRender();
-}
-function renderJobs() {
-  const root = $('transfer-jobs'); root.replaceChildren();
-  if (!state.jobs.length) { root.append(elem('p', 'empty', '暂无任务')); return; }
-  for (const job of [...state.jobs].reverse()) {
-    const row = elem('div', 'job-row'); row.append(elem('div', 'file-icon', '↓'));
-    const middle = elem('div', 'item-info'); middle.append(elem('strong', '', job.name));
-    middle.append(elem('span', '', `${job.status} · ${humanSize(job.received)} / ${humanSize(job.size)}`));
-    const progress = elem('div', 'progress');
-    const bar = elem('div'); bar.style.width = `${job.size ? Math.min(100, job.received / job.size * 100) : (job.url ? 100 : 0)}%`;
-    progress.append(bar); middle.append(progress);
-    row.append(middle);
-    const actions = elem('div', 'job-actions');
-    if (job.url) {
-      const a = elem('a', 'download-link', '保存'); a.href = job.url; a.download = job.name; actions.append(a);
-    } else if (state.active === job || state.queue.includes(job)) {
-      if (!job.cancelled) addButton(actions, '取消', () => cancelJob(job), 'secondary small-button');
-    } else if (job.status.startsWith('失败') || job.status === '已取消') {
-      addButton(actions, '重试', () => retryJob(job), 'secondary small-button');
-    }
-    row.append(actions); root.append(row);
-  }
 }
 
 $('qa-panel').hidden = !QA_MODE;
@@ -1888,6 +1931,7 @@ codeInput.oninput = event => {
   event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
 };
 $('enter-room').onclick = () => {
+  if ($('enter-room').disabled) return;
   try {
     const code = normalizeRoomCode(codeInput.value);
     const name = deviceName();
@@ -1895,7 +1939,10 @@ $('enter-room').onclick = () => {
     const session = remembered();
     if (session?.code === code) { action.id = session.id; action.token = session.token; }
     connect(action);
-  } catch (e) { feedback(e.message, true); }
+  } catch (e) {
+    setEntryLoading(false);
+    feedback(e.message, true);
+  }
 };
 $('leave-room').onclick = () => {
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
@@ -1913,6 +1960,7 @@ $('leave-room').onclick = () => {
   for (const peer of state.peers.values()) { clearTimeout(peer.connectTimer); peer.pc.close(); }
   state.peers.clear();
   state.code = ''; state.generation = ''; state.lastRoomEntry = null;
+  setEntryLoading(false);
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };
 $('copy-code').onclick = async () => { try { await navigator.clipboard.writeText(state.code); feedback('房间码已复制'); } catch { feedback(`房间码：${state.code}`); } };
