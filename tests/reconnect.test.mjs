@@ -1676,3 +1676,88 @@ test('file-time path rechecks still reject switched-to-relay or public prflx pat
   stats.get('r').address='192.168.32.5';
   assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,false);
 });
+
+test('R05: a verified open channel reannounces ready twice without renegotiating ICE', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const ws=t.FakeWebSocket.sockets[0];
+  await join(t,ws);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer",4)');
+  const peer=t.state.peers.get('other');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  const packets=[];
+  peer.channel.readyState='open';
+  peer.channel.send=data=>packets.push(JSON.parse(data));
+  await peer.channel.onopen();
+  assert.equal(peer.verified,true);
+  assert.equal(peer.remoteReady,false);
+  assert.equal(packets.filter(p=>p.kind==='ready').length,1);
+  const initialOffers=ws.sent.filter(m=>m.signal?.type==='offer').length;
+
+  fireNextTimer(t); // current 15 s timeout must not silently strand P2P handshake
+  await flushUntil(()=>packets.some(p=>p.kind==='ready' && p.requestReciprocal===true));
+  assert.equal(peer.ready,false,'no file bytes until reciprocal ready is received');
+  assert.equal([...t.timers.values()][0]?.ms,5000,'one bounded follow-up');
+  fireNextTimer(t);
+  await flushUntil(()=>packets.filter(p=>p.kind==='ready').length===3);
+  assert.equal(t.timers.size,0,'bounded retries must stop after two reannouncements');
+  assert.equal(ws.sent.filter(m=>m.signal?.type==='offer').length,initialOffers);
+  const diag=t.run('diagnosticsSnapshot().peers[0]');
+  assert.equal(diag.readyRetriesSent,2);
+  assert.equal(diag.canTransfer,false);
+
+  await t.run('receiveChannel(state.peers.get("other"),JSON.stringify({kind:"ready",hostHostVerified:true}))');
+  assert.equal(peer.ready,true);
+  assert.equal(t.timers.size,0);
+});
+
+test('R05: a duplicate ready can request one verified echo without a ping-pong loop', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  const peer=t.state.peers.get('other');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  const packets=[];
+  peer.channel.readyState='open';
+  peer.channel.send=data=>packets.push(JSON.parse(data));
+  await peer.channel.onopen();
+  await t.run('receiveChannel(state.peers.get("other"),JSON.stringify({kind:"ready"}))');
+  const firstCount=packets.filter(p=>p.kind==='ready').length;
+  await t.run('receiveChannel(state.peers.get("other"),JSON.stringify({kind:"ready",requestReciprocal:true}))');
+  await flushUntil(()=>packets.filter(p=>p.kind==='ready').length===firstCount+1);
+  const echoes=packets.filter(p=>p.kind==='ready');
+  assert.equal(echoes.at(-1).requestReciprocal,undefined,'echo never requests its own echo');
+  await t.run('receiveChannel(state.peers.get("other"),JSON.stringify({kind:"ready",requestReciprocal:true}))');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(packets.filter(p=>p.kind==='ready').length,firstCount+1);
+  assert.equal(t.run('diagnosticsSnapshot().peers[0].readyEchoesSent'),1);
+});
+
+test('R05: unsafe current path rejects ready retransmissions without opening transfer', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  await t.run('createPeer("other","Sky Deer",true,"gen-peer")');
+  const peer=t.state.peers.get('other');
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  const packets=[];
+  peer.channel.readyState='open';
+  peer.channel.send=data=>packets.push(JSON.parse(data));
+  await peer.channel.onopen();
+  assert.equal(packets.filter(p=>p.kind==='ready').length,1);
+  t.run('inspectSelectedPath = async () => ({allowed:false,reason:"unsafe currently selected path",code:"relay"})');
+  fireNextTimer(t);
+  await flushUntil(()=>t.timers.size===1 && [...t.timers.values()][0].ms===5000);
+  fireNextTimer(t);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(packets.filter(p=>p.kind==='ready').length,1,'never reattest unsafe path');
+  assert.equal(peer.ready,false);
+  assert.equal(t.timers.size,0);
+  await t.run('receiveChannel(state.peers.get("other"),JSON.stringify({kind:"ready",requestReciprocal:true}))');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(packets.filter(p=>p.kind==='ready').length,1,'unsafe path also rejects echo');
+});
