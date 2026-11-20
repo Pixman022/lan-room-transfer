@@ -2129,9 +2129,10 @@ test('entry button shows connecting progress, blocks repeat clicks and resets af
   assert.equal(failed.elements.get('entry-button-label').textContent, '进入房间');
 });
 
-test('top status dot retains text and tracks disconnected, waiting and ready state', () => {
+test('top status dot distinguishes offline, room-only, partial, waiting and full P2P', () => {
   const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
   assert.match(css, /connection-status::before/);
+  assert.match(css, /connection-status\[data-state='room'\]::before/);
   assert.match(css, /connection-status\[data-state='waiting'\]::before/);
   assert.match(css, /connection-status\[data-state='ready'\]::before/);
   const t = harness();
@@ -2140,13 +2141,22 @@ test('top status dot retains text and tracks disconnected, waiting and ready sta
   assert.equal(status.dataset.state, 'offline');
   assert.equal(status.textContent, '未连接');
   t.run('showRoom(true)');
-  assert.equal(status.dataset.state, 'waiting');
+  assert.equal(status.dataset.state, 'waiting', 'room is still connecting');
   t.state.ws = {readyState: 1};
   t.state.generation = 'gen-1';
   t.run('updateConnectionSummary()');
-  assert.equal(status.dataset.state, 'waiting');
+  assert.equal(status.dataset.state, 'room');
   assert.equal(status.textContent, '房间已连接');
-  t.state.peers.set('other', {ready: true});
+  t.state.peers.set('other', {ready: false});
+  t.run('updateConnectionSummary()');
+  assert.equal(status.dataset.state, 'waiting');
+  assert.equal(status.textContent, '直连未就绪');
+  t.state.peers.get('other').ready = true;
+  t.state.peers.set('second', {ready: false});
+  t.run('updateConnectionSummary()');
+  assert.equal(status.dataset.state, 'waiting', 'one ready peer must not claim full readiness');
+  assert.equal(status.textContent, '部分设备已连接');
+  t.state.peers.get('second').ready = true;
   t.run('updateConnectionSummary()');
   assert.equal(status.dataset.state, 'ready');
   assert.equal(status.textContent, '文件直连就绪');
