@@ -2105,8 +2105,8 @@ test('entry button shows connecting progress, blocks repeat clicks and resets af
   assert.match(html, /id="entry-button-label"/);
   const t = harness();
   const button = t.elements.get('enter-room');
-  const icon = t.elements.get('entry-loading-icon');
-  const label = t.elements.get('entry-button-label');
+  const icon = t.run("document.getElementById('entry-loading-icon')");
+  const label = t.run("document.getElementById('entry-button-label')");
   t.run("document.getElementById('enter-room').onclick()");
   assert.equal(button.disabled, true, 'button disabled while joining');
   assert.equal(icon.hidden, false, 'spinner visible while joining');
@@ -2135,7 +2135,7 @@ test('top status dot retains text and tracks disconnected, waiting and ready sta
   assert.match(css, /connection-status\[data-state='waiting'\]::before/);
   assert.match(css, /connection-status\[data-state='ready'\]::before/);
   const t = harness();
-  const status = t.elements.get('connection-status');
+  const status = t.run("document.getElementById('connection-status')");
   t.run('showRoom(false)');
   assert.equal(status.dataset.state, 'offline');
   assert.equal(status.textContent, '未连接');
@@ -2157,7 +2157,7 @@ test('room file rows merge receive, transfer progress and saved download without
   assert.match(html, /id="incoming-requests"/);
   assert.doesNotMatch(html, /id="transfer-jobs"/);
   const t = harness();
-  const root = t.elements.get('incoming-requests');
+  const root = t.run("document.getElementById('incoming-requests')");
   root.children = [];
   root.replaceChildren = (...nodes) => { root.children = [...nodes]; };
   root.append = (...nodes) => { root.children.push(...nodes); };
