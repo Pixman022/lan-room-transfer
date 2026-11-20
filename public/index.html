@@ -60,10 +60,22 @@
           <button id="cancel-device-name" class="text-button" type="button">取消</button>
         </div>
       </div>
+      <section id="qa-panel" class="panel qa-panel" hidden>
+        <div class="section-heading"><h2>并发验收 · 同步接收</h2><span class="muted small">仅 QA 模式</span></div>
+        <p class="muted small">A、B、C 分别选择本机要接收的文件并点击“准备接收”。全部准备好后，只在 A 点击一次“同步开始”。传输仍通过原有 P2P 安全验证。</p>
+        <label for="qa-file">本机将接收的文件</label>
+        <select id="qa-file" aria-label="选择本机准备接收的文件"></select>
+        <div class="qa-actions">
+          <button id="qa-arm" class="secondary small-button" type="button">准备接收</button>
+          <button id="qa-start" class="primary small-button" type="button">同步开始（只在 A 点击）</button>
+          <button id="qa-cancel" class="quiet-button small-button" type="button">取消准备</button>
+        </div>
+        <p id="qa-status" class="muted small" role="status" aria-live="polite">请选择文件后准备，三台设备均准备完成再统一开始。</p>
+      </section>
 
       <div class="room-grid">
         <section class="panel peer-panel">
-          <div class="section-heading"><h2>在线设备</h2><div class="section-tools"><span class="muted small" id="device-count">0 台</span><button class="text-button" id="toggle-diagnostics" type="button" aria-expanded="false" aria-controls="diagnostics-panel">诊断</button></div></div>
+          <div class="section-heading"><h2>在线设备</h2><div class="section-tools"><span class="muted small" id="device-count">0 台</span><button class="text-button" id="qa-enable" type="button" aria-controls="qa-panel" aria-expanded="false">并发验收</button><button class="text-button" id="toggle-diagnostics" type="button" aria-expanded="false" aria-controls="diagnostics-panel">诊断</button></div></div>
           <div class="device-list" id="peer-list"></div>
           <div class="diagnostics-panel" id="diagnostics-panel" hidden>
             <div class="diagnostics-content" id="diagnostics-content"></div>
@@ -91,18 +103,7 @@
           </section>
         </div>
       </div>
-      <section id="qa-panel" class="panel qa-panel" hidden>
-        <div class="section-heading"><h2>并发验收 · 同步接收</h2><span class="muted small">仅 QA 模式</span></div>
-        <p class="muted small">A、B、C 分别选择本机要接收的文件并点击“准备接收”。全部准备好后，只在 A 点击一次“同步开始”。传输仍通过原有 P2P 安全验证。</p>
-        <label for="qa-file">本机将接收的文件</label>
-        <select id="qa-file" aria-label="选择本机准备接收的文件"></select>
-        <div class="qa-actions">
-          <button id="qa-arm" class="secondary small-button" type="button">准备接收</button>
-          <button id="qa-start" class="primary small-button" type="button">同步开始（只在 A 点击）</button>
-          <button id="qa-cancel" class="quiet-button small-button" type="button">取消准备</button>
-        </div>
-        <p id="qa-status" class="muted small" role="status" aria-live="polite">请选择文件后准备，三台设备均准备完成再统一开始。</p>
-      </section>
+
     </section>
     <p class="feedback" id="feedback" role="status" aria-live="polite"></p>
     <p class="prototype-note" role="note">实验性大文件传输 · 无固定文件大小上限，受浏览器内存限制 · P2P 直传，不保证仅经过局域网</p>
