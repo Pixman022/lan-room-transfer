@@ -1213,6 +1213,122 @@ function retryJob(job) {
   state.queue.push(job); renderJobs(); renderRequests(); startNext();
 }
 
+// Deliberately opt-in diagnostic helper for one operator testing three devices.
+// The selected remote file never leaves this browser; only an empty P2P start
+// notice is sent on already verified peer channels. No cloud coordination.
+function qaFileChoices() {
+  if (!QA_MODE) return [];
+  const choices = [];
+  for (const [key, offer] of state.offers) {
+    const peer = state.peers.get(offer.peerId);
+    if (!peer?.ready) continue;
+    for (const file of offer.files) {
+      if (file.status === 'pending') {
+        choices.push({ key: `${key}:${file.id}`, offer, file, peer });
+      }
+    }
+  }
+  return choices;
+}
+function qaArmedTarget() {
+  if (!QA_MODE || !qaArmed || qaArmed.code !== state.code ||
+      state.ws?.readyState !== WebSocket.OPEN || !state.generation ||
+      state.active || state.queue.length) return null;
+  const choice = qaFileChoices().find(item => item.key === qaArmed.key);
+  return choice?.peer.generation === qaArmed.generation ? choice : null;
+}
+function qaRender() {
+  if (!QA_MODE) return;
+  const select = $('qa-file');
+  const previous = select.value;
+  const choices = qaFileChoices();
+  select.replaceChildren();
+  for (const item of choices) {
+    const option = elem('option', '', `${item.peer.name} · ${item.file.name} (${humanSize(item.file.size)})`);
+    option.value = item.key;
+    select.append(option);
+  }
+  select.value = choices.some(item => item.key === previous)
+    ? previous : choices[0]?.key || '';
+  select.disabled = Boolean(qaArmed) || qaTimer !== null || !choices.length;
+  $('qa-arm').disabled = !choices.length || Boolean(qaArmed) ||
+    qaTimer !== null || Boolean(state.active) || state.queue.length > 0;
+  $('qa-start').disabled = !qaArmedTarget() || qaTimer !== null ||
+    state.peers.size < 2 || [...state.peers.values()].some(peer => !peer.ready);
+  $('qa-cancel').disabled = !qaArmed && qaTimer === null;
+}
+function qaArmSelected() {
+  if (!QA_MODE || qaTimer !== null || qaArmed) return false;
+  const item = qaFileChoices().find(choice => choice.key === $('qa-file').value);
+  if (!item || state.active || state.queue.length || !state.generation) {
+    $('qa-status').textContent = '当前没有可准备的文件或设备直连未就绪';
+    return false;
+  }
+  qaArmed = { key: item.key, peerId: item.offer.peerId,
+    generation: item.peer.generation, code: state.code };
+  qaLastOutcome = '已准备';
+  $('qa-status').textContent = '本机已准备接收。请继续准备另外两台设备，最后只在 A 点击“同步开始”。';
+  qaRender();
+  return true;
+}
+function qaCancelPlan() {
+  if (!QA_MODE) return;
+  if (qaTimer !== null) clearTimeout(qaTimer);
+  qaTimer = null;
+  qaArmed = null;
+  qaLastOutcome = '已取消';
+  $('qa-status').textContent = '已取消准备，不会自动接收文件';
+  qaRender();
+}
+function qaScheduleStart() {
+  if (!QA_MODE || qaTimer !== null || !qaArmedTarget()) return false;
+  qaTriggerAt = Date.now();
+  qaLastOutcome = '倒计时';
+  qaTimer = setTimeout(() => {
+    qaTimer = null;
+    const item = qaArmedTarget();
+    qaArmed = null;
+    if (!item) {
+      qaLastOutcome = '已跳过：文件或连接不再可用';
+      $('qa-status').textContent = '目标文件或安全连接已改变，没有自动开始传输';
+      qaRender();
+      return;
+    }
+    // Use the same normal receive queue, sender path gate and SHA-256 logic.
+    acceptFile(item.offer, item.file);
+    const job = state.jobs.at(-1);
+    if (job && job.offerId === item.offer.offerId && job.fileId === item.file.id) {
+      job.qaTriggerAt = qaTriggerAt;
+    }
+    qaLastOutcome = '已发起接收';
+    $('qa-status').textContent = '已同时发起接收；进度在下方传输列表，结束后复制普通诊断。';
+    qaRender();
+  }, QA_START_DELAY_MS);
+  $('qa-status').textContent = '已收到同步开始通知，6 秒后自动发起接收。请保持页面前台。';
+  qaRender();
+  return true;
+}
+function qaStartAll() {
+  if (!QA_MODE || qaTimer !== null || !qaArmedTarget()) return false;
+  const peers = [...state.peers.values()];
+  if (peers.length < 2 || peers.some(peer => !peer.ready ||
+      peer.channel?.readyState !== 'open')) {
+    $('qa-status').textContent = '需要三台设备都进入房间且直连就绪';
+    qaRender();
+    return false;
+  }
+  // A single click on the coordinator sends a tiny notice over its already
+  // verified P2P links. An unarmed/normal client will always ignore it.
+  const sent = peers.every(peer => sendPeer(peer, {
+    kind: 'qa-start', delayMs: QA_START_DELAY_MS,
+  }));
+  if (!sent) {
+    $('qa-status').textContent = '部分同步通知未发出，本轮结果无效；请检查三台设备连接';
+    return false;
+  }
+  return qaScheduleStart();
+}
+
 // Each receiver asks for the current file catalog once it has independently
 // verified the P2P link. Early announcements may have been ignored before then.
 function requestSharedOffers(peer, refresh = false) {
@@ -1673,6 +1789,14 @@ function renderJobs() {
     }
     row.append(actions); root.append(row);
   }
+}
+
+$('qa-panel').hidden = !QA_MODE;
+if (QA_MODE) {
+  $('qa-arm').onclick = qaArmSelected;
+  $('qa-start').onclick = qaStartAll;
+  $('qa-cancel').onclick = qaCancelPlan;
+  qaRender();
 }
 
 $('device-name').value = deviceName();
