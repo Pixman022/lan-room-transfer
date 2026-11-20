@@ -14,8 +14,14 @@ const PEER_MAX_ATTEMPTS = 4;
 const READY_REANNOUNCE_MAX = 2;
 const READY_REANNOUNCE_DELAY_MS = 5000;
 const RECONNECT_MAX_DELAY_MS = 15000;
+const SIGNAL_KEEPALIVE_MS = 20000;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
+let signalKeepaliveTimer = null;
+let signalKeepalivePending = null;
+let signalKeepaliveSequence = 0;
+const signalHealth = { sent: 0, acksReceived: 0, timeouts: 0, disconnects: 0, reconnectsScheduled: 0,
+  lastDisconnect: null };
 const TRANSFER_IDLE_MS = 30000;
 const FULL_DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search || '');
 const debugStartedAt = Date.now();
@@ -205,10 +211,48 @@ function stopReconnect() {
   if (reconnectTimer !== null) clearTimeout(reconnectTimer);
   reconnectTimer = null;
 }
+function stopSignalKeepalive() {
+  if (signalKeepaliveTimer !== null) clearInterval(signalKeepaliveTimer);
+  signalKeepaliveTimer = null;
+  signalKeepalivePending = null;
+}
+// Browser JavaScript cannot observe native WebSocket ping/pong frames. An
+// application-level ack makes even a silent one-member room observable.
+function startSignalKeepalive(ws, onLost) {
+  stopSignalKeepalive();
+  signalKeepaliveTimer = setInterval(() => {
+    if (state.ws !== ws || state.leaving) return;
+    if (ws.readyState !== WebSocket.OPEN || signalKeepalivePending !== null) {
+      signalHealth.timeouts += 1;
+      signalHealth.lastDisconnect = 'keepalive-timeout';
+      trace('websocket.keepalive.timeout', { pending: signalKeepalivePending });
+      // Detach and schedule recovery NOW: close() on a black-holed network
+      // may not fire a browser close event until the TCP timeout.
+      onLost('keepalive-timeout');
+      try { ws.close(); } catch { /* Already unusable. */ }
+      return;
+    }
+    const seq = ++signalKeepaliveSequence;
+    try {
+      ws.send(JSON.stringify({ type: 'keepalive', seq }));
+      signalHealth.sent += 1;
+      signalKeepalivePending = seq;
+      trace('websocket.keepalive.sent', { seq });
+      renderDiagnostics();
+    } catch (error) {
+      signalHealth.timeouts += 1;
+      signalHealth.lastDisconnect = 'keepalive-send-failed';
+      trace('websocket.keepalive.send-failed', { error: String(error) });
+      onLost('keepalive-send-failed');
+      try { ws.close(); } catch { /* Already unusable. */ }
+    }
+  }, SIGNAL_KEEPALIVE_MS);
+}
 function scheduleReconnect(action) {
   if (state.leaving || reconnectTimer !== null || !(state.code || action.code)) return;
   const seconds = Math.min(RECONNECT_MAX_DELAY_MS, 1000 * (2 ** Math.min(reconnectAttempts, 4))) / 1000;
   reconnectAttempts += 1;
+  signalHealth.reconnectsScheduled += 1;
   trace('websocket.reconnect.scheduled', { delaySeconds: seconds, action, currentRoom: state.code });
   feedback(`连接中断，将在 ${seconds} 秒后自动恢复…`, true);
   reconnectTimer = setTimeout(() => {
@@ -229,28 +273,13 @@ function connect(action) {
   const ws = new WebSocket(`${scheme}://${location.host}/ws`);
   state.ws = ws;
   trace('websocket.created', { url: ws.url, action, reconnectAttempts });
-  ws.addEventListener('open', () => {
-    trace('websocket.open', { action });
-    if (state.ws === ws) debugSend(ws, action);
-  });
-  const processMessage = orderedMessageHandler(
-    msg => state.ws === ws ? handleServer(msg) : undefined,
-    err => {
-      trace('websocket.message.handler.error', { error: String(err), stack: err?.stack });
-      recordSignalError(err.message);
-      feedback(`连接处理失败：${err.message}`, true);
-    },
-  );
-  ws.addEventListener('message', event => {
-    let msg;
-    try { msg = JSON.parse(event.data); }
-    catch { return; }
-    trace('websocket.receive', msg);
-    void processMessage(msg);
-  });
-  ws.addEventListener('close', event => {
-    trace('websocket.close', { code: event.code, reason: event.reason, wasClean: event.wasClean });
+  const onDisconnected = (reason = 'socket-close') => {
     if (state.ws !== ws) return;
+    stopSignalKeepalive();
+    if (reason !== 'keepalive-timeout' && reason !== 'keepalive-send-failed') {
+      signalHealth.lastDisconnect = reason;
+    }
+    signalHealth.disconnects += 1;
     state.ws = null;
     const wasJoined = Boolean(state.code);
     state.generation = '';
@@ -275,6 +304,35 @@ function connect(action) {
       state.code = ''; state.ownOffers = []; state.outbound.clear();
     }
     renderPeers(); renderRequests(); renderJobs(); renderSentFiles();
+  };
+  ws.addEventListener('open', () => {
+    trace('websocket.open', { action });
+    if (state.ws === ws) debugSend(ws, action);
+  });
+  const processMessage = orderedMessageHandler(
+    async msg => {
+      if (state.ws !== ws) return;
+      await handleServer(msg);
+      if (msg.type === 'welcome' && state.ws === ws && state.generation) {
+        startSignalKeepalive(ws, onDisconnected);
+      }
+    },
+    err => {
+      trace('websocket.message.handler.error', { error: String(err), stack: err?.stack });
+      recordSignalError(err.message);
+      feedback(`连接处理失败：${err.message}`, true);
+    },
+  );
+  ws.addEventListener('message', event => {
+    let msg;
+    try { msg = JSON.parse(event.data); }
+    catch { return; }
+    trace('websocket.receive', msg);
+    void processMessage(msg);
+  });
+  ws.addEventListener('close', event => {
+    trace('websocket.close', { code: event.code, reason: event.reason, wasClean: event.wasClean });
+    onDisconnected();
   });
   ws.addEventListener('error', event => {
     trace('websocket.error', { type: event.type, readyState: ws.readyState });
@@ -283,6 +341,14 @@ function connect(action) {
 }
 async function handleServer(msg) {
   switch (msg.type) {
+    case 'keepalive-ack':
+      if (msg.seq === signalKeepalivePending && state.ws?.readyState === WebSocket.OPEN) {
+        signalKeepalivePending = null;
+        signalHealth.acksReceived += 1;
+        trace('websocket.keepalive.ack', { seq: msg.seq });
+        renderDiagnostics();
+      }
+      break;
     case 'error':
       recordSignalError(msg.message);
       feedback(msg.message || '未知错误', true);
@@ -1177,6 +1243,12 @@ function diagnosticsSnapshot() {
     signal: state.ws?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
     signalErrors: state.signalErrors,
     lastSignalError: state.lastSignalError,
+    signalKeepalive: {
+      sent: signalHealth.sent, acksReceived: signalHealth.acksReceived,
+      timeouts: signalHealth.timeouts, pending: signalKeepalivePending !== null,
+      disconnects: signalHealth.disconnects, reconnectsScheduled: signalHealth.reconnectsScheduled,
+      lastDisconnect: signalHealth.lastDisconnect,
+    },
     peerCount: state.peers.size,
     roomEntry: state.lastRoomEntry,
     localSharedFiles: state.ownOffers.reduce((n, offer) => n + offer.files.length, 0),
@@ -1388,6 +1460,8 @@ function renderDiagnostics() {
   root.replaceChildren();
   const header = elem('p', 'diagnostic-line', data.peerCount ? `设备：${data.peerCount} · 可传：${data.peers.filter(peer => peer.canTransfer).length}` : '尚无其他设备');
   root.append(header);
+  root.append(elem('p', 'diagnostic-line',
+    `信令：${data.signal} · 房间进入：${data.roomEntry || '未进入'} · 心跳响应 ${data.signalKeepalive.acksReceived}/${data.signalKeepalive.sent} · 超时 ${data.signalKeepalive.timeouts} · 断开 ${data.signalKeepalive.disconnects} · 自动重连 ${data.signalKeepalive.reconnectsScheduled}`));
   if (data.signalErrors) {
     root.append(elem('p', 'diagnostic-line',
       `信令错误：${data.signalErrors} · ${data.lastSignalError}`));
@@ -1568,6 +1642,7 @@ $('leave-room').onclick = () => {
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
   state.leaving = true;
   stopReconnect();
+  stopSignalKeepalive();
   reconnectAttempts = 0;
   sessionStorage.removeItem('lan-room-session');
   for (const job of state.jobs) if (job.url) URL.revokeObjectURL(job.url);
