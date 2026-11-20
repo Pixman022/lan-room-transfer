@@ -139,6 +139,16 @@ main { min-height: calc(100vh - 76px); }
 .job-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .download-link { display: inline-block; text-decoration: none; padding: 7px 10px; border-radius: 9px; background: var(--tint-blue); color: var(--tint-blue-ink); font-size: 12px; font-weight: 650; }
 .download-link:hover { text-decoration: underline; }
+/* Explicit ?qa=1 only: a temporary helper, never part of the normal room UI. */
+.qa-panel { margin: 20px 0 0; }
+.qa-panel p { margin: 6px 0 16px; }
+.qa-panel label { display: block; font-size: 13px; font-weight: 650; margin-bottom: 8px; }
+.qa-panel select { width: 100%; min-width: 0; border: 1px solid var(--line);
+  background: var(--paper); color: var(--text); border-radius: 11px; padding: 11px 13px; }
+.qa-panel select:focus-visible { outline: 3px solid var(--line-strong); outline-offset: 2px; }
+.qa-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 13px; }
+.qa-panel #qa-status { margin: 12px 0 0; }
+
 
 @media (max-width: 860px) {
   .room-grid { grid-template-columns: 1fr; }
