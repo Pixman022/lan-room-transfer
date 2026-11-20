@@ -255,6 +255,25 @@ test('receive queue transfers multiple batches serially with real SHA-256, inclu
   assert.equal(t.receiver.run('diagnosticsSnapshot().peers[0].transfer.startsReceived'),3);
 });
 
+test('file shelf accepts a 33 MiB file, transfers it and verifies original SHA-256', async () => {
+  const t=await linkedFilePeers();
+  const source=new Blob([new Uint8Array(32*1024*1024+19).fill(83)]);
+  // The selected-file object is a stub; the sender's outbound data is replaced
+  // with the real Blob so WebCrypto and the actual chunk path run unmodified.
+  t.sender.run(`shareFiles([{name:'large.bin',size:${source.size},type:'application/octet-stream'}])`);
+  assert.equal(t.sender.state.ownOffers.length,1,'32 MiB must not be a hard sharing limit');
+  const offer=t.sender.state.ownOffers[0];
+  assert.equal(offer.files[0].size,source.size);
+  t.sender.state.outbound.get(offer.offerId).set(offer.files[0].id,source);
+  await flushUntil(()=>t.receiver.state.offers.has('sender:'+offer.offerId));
+  const received=t.receiver.state.offers.get('sender:'+offer.offerId);
+  assert.equal(received.files[0].size,source.size,'metadata above 32 MiB must be accepted');
+  t.receiver.run('acceptFile(state.offers.values().next().value, state.offers.values().next().value.files[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0]?.status==='校验通过，点击保存',20000);
+  assert.equal(t.receiver.savedBlobs[0].size,source.size);
+  assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(source));
+});
+
 test('three peers: concurrent independent receivers and a second uploader never mix files', async () => {
   const clients={};
   for(const id of ['A','B','C']){
