@@ -798,6 +798,28 @@ test('failed control-channel send returns an immediate failure instead of waitin
   assert.equal(t.run('diagnosticsSnapshot().peers[0].transfer.sendErrors'),1);
 });
 
+test('ordinary diagnostics distinguish new room, existing-room join and authenticated resume', async () => {
+  const makeWelcome = (id,created) => JSON.stringify({
+    type:'welcome',code:'5832',id,token:'local-token',generation:'gen-1',
+    name:'Amber Fox',peers:[],created,
+  });
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const ws=t.FakeWebSocket.sockets[0];
+  ws.open();
+  await t.run(`handleServer(${makeWelcome('local-id',true)})`);
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'created');
+  await t.run(`handleServer(${makeWelcome('local-id',false)})`);
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'resumed');
+  await t.run(`handleServer(${makeWelcome('new-id',false)})`);
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'joined');
+  await t.run(`handleServer(${makeWelcome('newer-id',true)})`);
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'created');
+  const diagnostic=JSON.stringify(t.run('diagnosticsSnapshot()'));
+  assert.ok(!diagnostic.includes('local-token'));
+  assert.ok(!diagnostic.includes('5832'));
+});
+
 test('unexpected disconnect re-enters same room with identity and staged files', async () => {
   const t = harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
