@@ -526,7 +526,9 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
     pc, channel: null, verified: false, remoteReady: false, remoteHostPairVerified: false, localReadySent: false,
     readyRetryAttempts: 0, readyRetriesSent: 0, readyEchoesSent: 0, readyEchoAnswered: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(),
-    catalogRequested: false, catalogReplayDone: false, routeInfo: null,
+    catalogRequested: false, catalogReplayDone: false,
+    catalogRefreshSeq: 0, lastCatalogRefreshSeq: 0, recoveryCheckInFlight: false,
+    routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
     startedAt: Date.now(), firstAttemptStartedAt, readyAt: null, connectTimer: null,
@@ -571,6 +573,7 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
       if (pc.connectionState !== 'closed') schedulePeerTimeout(peer, 5000);
     } else if (pc.connectionState === 'connected' && !peer.ready) {
       peer.reason = '正在检查 P2P 连接';
+      void restorePeerAfterTransientDisconnect(peer);
     }
     renderPeers();
   };
@@ -582,6 +585,9 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
       peer.ready = false;
       peer.reason = 'ICE 检查失败，准备重新协商';
       schedulePeerTimeout(peer, 2500);
+    } else if (['connected', 'completed'].includes(pc.iceConnectionState) &&
+               pc.connectionState === 'connected' && !peer.ready) {
+      void restorePeerAfterTransientDisconnect(peer);
     }
     renderPeers();
   };
@@ -703,6 +709,47 @@ function inspectPeerPath(peer) {
     remoteHostPairVerified: peer.remoteHostPairVerified,
     channelOpen: peer.channel?.readyState === 'open',
   });
+}
+// A transient RTC disconnect revokes transfer readiness. A healthy transport
+// alone cannot restore it: re-attest the CURRENT selected path first, then
+// refresh both catalogs because file-list controls may have been dropped while
+// either endpoint was temporarily not ready. No ICE renegotiation or file bytes.
+async function restorePeerAfterTransientDisconnect(peer) {
+  const eligible = () => state.peers.get(peer.id) === peer && !peer.ready &&
+    peer.readyAt !== null && peer.verified && peer.localReadySent && peer.remoteReady &&
+    peer.channel?.readyState === 'open' && peer.pc.connectionState === 'connected' &&
+    ['connected', 'completed'].includes(peer.pc.iceConnectionState);
+  if (!eligible() || peer.recoveryCheckInFlight) return;
+  peer.recoveryCheckInFlight = true;
+  try {
+    let verdict;
+    try { verdict = await inspectPeerPath(peer); }
+    catch { verdict = { allowed: false, reason: '当前路径检查失败', code: 'stats-error' }; }
+    if (!eligible()) return;
+    if (!verdict?.allowed) {
+      peer.reason = `拒绝传输：${verdict?.reason || '当前路径未通过安全验证'}`;
+      renderPeers();
+      return;
+    }
+    peer.routeInfo = {
+      code: verdict.code ?? 'unknown',
+      localAddressKind: verdict.localAddressKind ?? 'unavailable',
+      remoteAddressKind: verdict.remoteAddressKind ?? 'unavailable',
+      localCandidateType: verdict.localCandidateType ?? 'unavailable',
+      remoteCandidateType: verdict.remoteCandidateType ?? 'unavailable',
+    };
+    peer.ready = true;
+    peer.reason = '文件直连就绪';
+    clearTimeout(peer.connectTimer);
+    // Metadata is safe to replay on a freshly re-verified P2P connection.
+    // Recipients deduplicate by offerId; refresh requests are sequenced.
+    peer.syncedOffers.clear();
+    syncSharedOffers(peer);
+    requestSharedOffers(peer, true);
+    renderPeers();
+  } finally {
+    peer.recoveryCheckInFlight = false;
+  }
 }
 async function verifyPeerPath(peer) {
   let verdict;
@@ -861,10 +908,18 @@ async function receiveChannel(peer, data) {
   } else if (msg.kind === 'route-proof') {
     peer.remoteHostPairVerified = msg.hostHostVerified === true;
   } else if (msg.kind === 'file-list-request') {
-    // This peer finished its own route verification after our first catalog
-    // announcement. Replay once, only over the verified P2P channel.
-    if (peer.catalogReplayDone) return;
-    peer.catalogReplayDone = true;
+    // The legacy first-ready request is replayed once. Subsequent requests
+    // are permitted only with a strictly increasing per-peer recovery sequence.
+    // Duplicate packets cannot repeatedly amplify catalog announcements.
+    if (msg.refreshSeq !== undefined) {
+      if (!Number.isSafeInteger(msg.refreshSeq) || msg.refreshSeq < 1 ||
+          msg.refreshSeq <= peer.lastCatalogRefreshSeq) return;
+      peer.lastCatalogRefreshSeq = msg.refreshSeq;
+      countTransfer(peer, 'catalog-refresh-request:received');
+    } else {
+      if (peer.catalogReplayDone) return;
+      peer.catalogReplayDone = true;
+    }
     peer.syncedOffers.clear();
     syncSharedOffers(peer);
   } else if (msg.kind === 'file-list') {
@@ -1141,9 +1196,19 @@ function retryJob(job) {
 
 // Each receiver asks for the current file catalog once it has independently
 // verified the P2P link. Early announcements may have been ignored before then.
-function requestSharedOffers(peer) {
-  if (!peer?.ready || peer.catalogRequested) return;
-  if (sendPeer(peer, { kind: 'file-list-request' })) peer.catalogRequested = true;
+function requestSharedOffers(peer, refresh = false) {
+  if (!peer?.ready || (peer.catalogRequested && !refresh)) return;
+  const nextSeq = peer.catalogRefreshSeq + 1;
+  const request = refresh
+    ? { kind: 'file-list-request', refreshSeq: nextSeq }
+    : { kind: 'file-list-request' };
+  if (sendPeer(peer, request)) {
+    peer.catalogRequested = true;
+    if (refresh) {
+      peer.catalogRefreshSeq = nextSeq;
+      countTransfer(peer, 'catalog-refresh-request:sent');
+    }
+  }
 }
 // File objects remain in the uploader's browser; the signalling server stores none.
 // Each verified peer gets the current room file catalog, including later joiners.
@@ -1311,6 +1376,8 @@ function diagnosticsSnapshot() {
         catalogsSent: peer.transferEvents?.['file-list:sent'] || 0,
         catalogsReceived: peer.transferEvents?.['file-list:received'] || 0,
         catalogsIgnoredBeforeReady: peer.transferEvents?.['catalog-ignored-unready'] || 0,
+        catalogRefreshRequestsSent: peer.transferEvents?.['catalog-refresh-request:sent'] || 0,
+        catalogRefreshRequestsReceived: peer.transferEvents?.['catalog-refresh-request:received'] || 0,
         catalogRequestsSent: peer.transferEvents?.['file-list-request:sent'] || 0,
         catalogRequestsReceived: peer.transferEvents?.['file-list-request:received'] || 0,
         ignoredStarts: peer.transferEvents?.['start-ignored-mismatch'] || 0,
