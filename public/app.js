@@ -1113,6 +1113,8 @@ function diagnosticsSnapshot() {
     signalErrors: state.signalErrors,
     lastSignalError: state.lastSignalError,
     peerCount: state.peers.size,
+    localSharedFiles: state.ownOffers.reduce((n, offer) => n + offer.files.length, 0),
+    visibleRemoteFiles: [...state.offers.values()].reduce((n, offer) => n + offer.files.length, 0),
     peers: [...state.peers.values()].map((peer, index) => ({
       device: index + 1,
       connection: peer.pc?.connectionState ?? 'unknown',
