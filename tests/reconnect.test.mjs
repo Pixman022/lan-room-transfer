@@ -2212,3 +2212,24 @@ test('room file rows merge receive, transfer progress and saved download without
   assert.equal(view().rows, 1, 'saved file stays reachable after offer disappears');
   assert.equal(view().action, '保存');
 });
+
+
+test('room number copy icon replaces online badge and redundant toolbar button', async () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const title = html.match(/<div class="room-title-line">([\s\S]*?)<\/div>/)?.[1] ?? '';
+  const actions = html.match(/<div class="room-actions">([\s\S]*?)<\/div>/)?.[1] ?? '';
+  assert.match(title, /id="room-name"/);
+  assert.match(title, /id="copy-code"/);
+  assert.match(title, /aria-label="复制房间号"/);
+  assert.doesNotMatch(title, /class="chip ready"|>在线</);
+  assert.doesNotMatch(actions, /id="copy-code"/);
+  assert.match(actions, /id="leave-room"/);
+  assert.equal((html.match(/id="copy-code"/g) ?? []).length, 1);
+
+  // Clipboard access is unavailable in this fake browser: existing fallback
+  // must still communicate the room number when the icon is clicked.
+  const t = harness();
+  t.state.code = 'ROOM42';
+  await t.elements.get('copy-code').onclick();
+  assert.equal(t.elements.get('feedback').textContent, '房间码：ROOM42');
+});
