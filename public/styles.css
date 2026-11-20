@@ -66,10 +66,9 @@ main { min-height: calc(100vh - 76px); }
 .identity-preview strong, .identity-copy strong { font-size: 20px; line-height: 1.25; font-weight: 720; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .avatar { display: grid; place-items: center; border-radius: 50%; flex-shrink: 0; background: var(--tint-blue); border: 2px solid var(--line-strong); font-size: 31px; }
 .avatar-lg { width: 70px; height: 70px; }
-.entry-panel label, .rename-inline label { display: block; font-size: 13px; font-weight: 650; margin: 0 0 8px; }
-.entry-panel input, .rename-inline input { background: var(--paper); color: var(--text); border-radius: 11px; border: 1px solid var(--line); padding: 13px 14px; outline: none; width: 100%; min-width: 0; }
-.entry-panel > input { margin-bottom: 20px; }
-.entry-panel input:focus, .rename-inline input:focus { border-color: var(--line-strong); box-shadow: 0 0 0 3px var(--tint-blue); }
+.entry-panel label { display: block; font-size: 13px; font-weight: 650; margin: 0 0 8px; }
+.entry-panel input { background: var(--paper); color: var(--text); border-radius: 11px; border: 1px solid var(--line); padding: 13px 14px; outline: none; width: 100%; min-width: 0; }
+.entry-panel input:focus { border-color: var(--line-strong); box-shadow: 0 0 0 3px var(--tint-blue); }
 .room-code-editor { display: flex; gap: 10px; align-items: stretch; margin-bottom: 23px; }
 .room-code-editor input { flex: 1; font-size: 18px; font-weight: 660; letter-spacing: .045em; }
 .room-code-editor button { width: 49px; padding: 0; font-size: 24px; }
@@ -86,10 +85,14 @@ main { min-height: calc(100vh - 76px); }
 .identity-strip { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 10px 0 28px; }
 .identity-main { display: flex; align-items: center; gap: 14px; }
 .identity-copy { min-width: 0; }
+.device-name-line { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.device-name-text { min-width: 1ch; max-width: min(55vw, 430px); white-space: pre-wrap; border-bottom: 2px solid transparent; overflow-wrap: anywhere; }
+.device-name-text[contenteditable="plaintext-only"] { background: var(--tint-blue); border-bottom-color: var(--tint-blue-ink); outline: none; border-radius: 3px 3px 0 0; }
+.device-name-text[contenteditable="plaintext-only"]:focus-visible { outline: 2px solid var(--line-strong); outline-offset: 3px; }
+.edit-name-button { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border-radius: 8px; background: transparent; color: var(--muted); }
+.edit-name-button:hover { background: var(--tint-blue); color: var(--tint-blue-ink); }
 .text-button { color: var(--tint-blue-ink); background: transparent; font-size: 12px; padding: 6px 4px; }
 .text-button:hover { text-decoration: underline; }
-.rename-inline { display: flex; align-items: center; gap: 9px; width: min(390px, 100%); }
-.rename-inline input { flex: 1; }
 
 /* Room workspace */
 .room-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
