@@ -9,7 +9,7 @@ code = '\n'.join(re.sub(r'\bexport (?=(?:const|function|async function)\b)', '',
                  for module in modules)
 app = '\n'.join(line for line in (ROOT / 'public/app.js').read_text().splitlines()
                 if not line.startswith('import '))
-code += '\n' + app + '\nwindow.__demo = {state, showRoom, renderPeers, renderRequests, renderJobs, '
+code += '\n' + app + '\nwindow.__demo = {state, showRoom, renderPeers, renderRoomFiles, '
 code += 'syncSharedOffers, receiveChannel, handleServer, shareFiles, withdrawSharedFile, orderedMessageHandler, createPeer};'
 html = (ROOT / 'public/index.html').read_text()
 css = (ROOT / 'public/styles.css').read_text()
@@ -194,15 +194,59 @@ with sync_playwright() as playwright:
                     {id:'file-b', name:'Photo.png', size:92345}
                 ]}));
         }''')
+        assert page.locator('#transfer-jobs').count() == 0
+        assert page.locator('#incoming-requests .file-row').count() == 2
         assert page.locator('.request .file-row button').count() == 2
         assert page.locator('.request-footer button').inner_text() == '接收全部 (2)'
         page.screenshot(path=str(ROOT / 'docs' / f'room-{label}-static.png'), full_page=True)
         page.locator('.request .file-row button').first.click()
         assert page.evaluate('window.__demo.state.jobs.length') == 1
+        assert page.locator('#incoming-requests .file-row').count() == 2
+        assert page.locator('#incoming-requests .job-row').count() == 1
+        assert page.locator('#incoming-requests .job-row button').inner_text() == '取消'
         page.locator('.request-footer button').click()
         assert page.evaluate('window.__demo.state.jobs.length') == 2
         assert page.evaluate('window.__demo.state.queue.length') == 1
+        assert page.locator('#incoming-requests .file-row').count() == 2
+        assert page.locator('#incoming-requests .job-row').count() == 2
         assert page.locator('.request input[type=checkbox]').count() == 0
+
+        # The same entry shows live progress, then a Save action without duplication.
+        page.evaluate('''() => {
+            const d = window.__demo;
+            const job = d.state.jobs[0];
+            job.received = job.size / 2;
+            job.status = '传输中';
+            d.renderRoomFiles();
+        }''')
+        assert '传输中' in page.locator('#incoming-requests .job-row').first.inner_text()
+        assert page.locator('#incoming-requests .job-row .progress > div').first.get_attribute('style') == 'width: 50%;'
+        page.evaluate('''() => {
+            const d = window.__demo;
+            const job = d.state.jobs[0];
+            job.received = job.size;
+            job.status = '校验通过，点击保存';
+            job.url = 'blob:test-received';
+            d.state.active = null;
+            d.state.offers.get('peer-1:received').files.find(f => f.id === job.fileId).status = 'complete';
+            d.renderRoomFiles();
+        }''')
+        assert page.locator('#incoming-requests .file-row').count() == 2
+        assert page.locator('#incoming-requests a.download-link[download="Design.pdf"]').count() == 1
+
+        # The next file can fail and expose Retry in its original row.
+        page.evaluate('''() => {
+            const d = window.__demo;
+            const job = d.state.jobs[1];
+            d.state.queue = d.state.queue.filter(item => item !== job);
+            job.status = '失败：模拟连接中断';
+            d.state.offers.get('peer-1:received').files.find(f => f.id === job.fileId).status = 'failed';
+            d.renderRoomFiles();
+        }''')
+        assert page.locator('#incoming-requests .job-row button').inner_text() == '重试'
+        page.locator('#incoming-requests .job-row button').click()
+        assert page.evaluate('window.__demo.state.jobs.length') == 2
+        assert page.locator('#incoming-requests .job-row').count() == 2
 
         # Withdrawal propagates to every connected device without affecting other files.
         page.locator('#sent-files .file-row button').first.click()
@@ -213,7 +257,10 @@ with sync_playwright() as playwright:
             const d = window.__demo;
             await d.handleServer({type:'peer-offline', id:'peer-1'});
         }''')
-        assert page.locator('#incoming-requests .request').count() == 0
+        assert page.locator('#incoming-requests .request').count() == 1
+        assert '已撤回或离线的文件' in page.locator('#incoming-requests').inner_text()
+        assert page.locator('#incoming-requests .file-row').count() == 2
+        assert page.locator('#incoming-requests a.download-link[download="Design.pdf"]').count() == 1
         page.screenshot(path=str(ROOT / 'docs' / f'room-{label}-queue-static.png'), full_page=True)
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), f'{label} horizontal overflow'
         assert not errors, errors
