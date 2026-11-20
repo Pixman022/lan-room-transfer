@@ -14,8 +14,8 @@
 - Receive individual files by clicking **Receive** next to the file or click **Receive All** for all remaining files in that offer. **No checkboxes, Select All, or Receive Selected.**
 - Keep one active inbound transfer per receiving device; view file-level progress, cancel and retry failures.
 - Download with default browser behavior, optionally choose a save location on browsers that support it.
-- Exit at will. Creator departure never closes a room with other connected users. When the last device disconnects, keep a **2-minute reconnection window**, then close the room.
-- If the page reloads while a session exists, show that room code for re-entry and silently restore the previous member identity when the session token is still valid. The random numeric code has no separate five-minute joining cutoff.
+- Exit at will. Creator departure never closes a room with other connected users. **When the last online device disconnects (voluntarily or unexpectedly), immediately close the now-empty room and release its code.** Re-entering the same code starts a fresh room; the previous server-side member identity cannot be restored. If any member remains online, reconnecting devices can join that existing room. A browser tab that remains open may preserve its locally staged File objects across automatic reconnection, but unfinished transfers restart from zero; no files or interrupted bytes are stored on the server.
+- If the page reloads while a session exists, show the previous room code for re-entry. Silently restore the member identity **only if that original room is still alive** (at least one member remains online, or a rapid socket takeover completes before the final disconnect); otherwise join/create a new room with a new identity. A closed tab loses its in-memory File objects and requires reselecting files. The random numeric code has no separate five-minute joining cutoff.
 - Use rooms without administrators, while maintaining local peer-blocking, request rate limits and explicit file acceptance.
 
 ## Approved network boundary — restricted P2P mode

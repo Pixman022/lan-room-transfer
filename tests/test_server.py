@@ -18,8 +18,7 @@ class ClosedSocketTests(unittest.IsolatedAsyncioTestCase):
 
 class RoomUnitTests(unittest.TestCase):
     def test_first_enter_creates_following_enter_joins_and_code_is_reusable(self):
-        now = [1000.0]
-        rooms = RoomRegistry(clock=lambda: now[0])
+        rooms = RoomRegistry()
         class StubWs:
             closed = False
         room, first, created = rooms.enter("home2026", "Laptop", StubWs())
@@ -30,14 +29,14 @@ class RoomUnitTests(unittest.TestCase):
         self.assertFalse(created)
         self.assertNotEqual(first.id, second.id)
         rooms.leave(room, first, first.ws)
+        self.assertIs(rooms.rooms["HOME2026"], room)
         rooms.leave(room, second, second.ws)
-        room.empty_at = now[0]
-        now[0] += 119
-        self.assertIn(room.code, rooms.rooms)
-        now[0] += 2
-        new_room, _, created = rooms.enter("HOME2026", "New laptop", StubWs())
+        self.assertNotIn("HOME2026", rooms.rooms)
+        new_room, replacement, created = rooms.enter("HOME2026", "New laptop", StubWs())
         self.assertTrue(created)
         self.assertIsNot(new_room, room)
+        self.assertNotIn(second.id, new_room.members)
+        self.assertIn(replacement.id, new_room.members)
 
     def test_suggested_random_code_is_unused_but_does_not_reserve(self):
         now = [900.0]
@@ -61,9 +60,8 @@ class RoomUnitTests(unittest.TestCase):
             rooms.enter("1234", "", object())
         self.assertNotIn("1234", rooms.rooms)
 
-    def test_owner_departure_does_not_end_room_and_idle_grace(self):
-        now = [1000.0]
-        rooms = RoomRegistry(clock=lambda: now[0])
+    def test_owner_departure_does_not_end_room_but_last_departure_closes_it(self):
+        rooms = RoomRegistry()
         class StubWs:
             closed = False
         ws_a, ws_b = StubWs(), StubWs()
@@ -71,13 +69,8 @@ class RoomUnitTests(unittest.TestCase):
         _, b, _ = rooms.enter("ROOM2026", "Member", ws_b)
         rooms.leave(room, a, ws_a)
         self.assertEqual([m.name for m in room.online()], ["Member"])
-        self.assertIsNone(room.empty_at)
-        rooms.leave(room, b, ws_b)
-        self.assertEqual(room.empty_at, 1000.0)
-        now[0] += 60
         self.assertIn("ROOM2026", rooms.rooms)
-        now[0] += 61
-        rooms.sweep()
+        rooms.leave(room, b, ws_b)
         self.assertNotIn("ROOM2026", rooms.rooms)
 
     def test_authenticated_refresh_reuses_member_and_replaces_socket(self):
@@ -96,7 +89,22 @@ class RoomUnitTests(unittest.TestCase):
         self.assertEqual(len(room.online()), 1)
         rooms.leave(room, original, old_ws)
         self.assertIs(original.ws, new_ws)
-        self.assertIsNone(room.empty_at)
+        self.assertIs(rooms.rooms["ABCD"], room)
+
+    def test_closed_socket_sweep_releases_room_and_stale_leave_cannot_remove_replacement(self):
+        rooms = RoomRegistry()
+        class StubWs:
+            closed = False
+        old_ws = StubWs()
+        old_room, old_member, _ = rooms.enter("CODE2026", "Old", old_ws)
+        old_ws.closed = True
+        rooms.sweep()
+        self.assertNotIn("CODE2026", rooms.rooms)
+        replacement_room, _, created = rooms.enter("CODE2026", "New", StubWs())
+        self.assertTrue(created)
+        self.assertIsNot(replacement_room, old_room)
+        rooms.leave(old_room, old_member, old_ws)
+        self.assertIs(rooms.rooms["CODE2026"], replacement_room)
 
     def test_invalid_codes(self):
         rooms = RoomRegistry()
@@ -108,8 +116,7 @@ class RoomUnitTests(unittest.TestCase):
 
 class RoomLifecycleIntegrationTests(AioHTTPTestCase):
     async def get_application(self):
-        self.now = [1000.0]
-        self.registry = RoomRegistry(clock=lambda: self.now[0])
+        self.registry = RoomRegistry()
         return create_app(registry=self.registry)
 
     async def enter(self, code, name, previous=None):
@@ -124,15 +131,15 @@ class RoomLifecycleIntegrationTests(AioHTTPTestCase):
         return ws, welcome
 
     async def until(self, predicate):
-        # WebSocket close callbacks run asynchronously. Wait for cleanup, not
-        # for the 120-second test clock to elapse in real time.
+        # WebSocket close callbacks run asynchronously. Wait for teardown,
+        # rather than assuming the close handler has already completed.
         for _ in range(100):
             if predicate():
                 return
             await asyncio.sleep(0.01)
         self.fail("WebSocket teardown did not reach the expected room state")
 
-    async def test_creator_leaves_and_last_member_can_resume_until_exact_expiry(self):
+    async def test_creator_leaves_and_last_disconnect_releases_room_immediately(self):
         code = "TESTROOM26"
         a, a_info = await self.enter(code, "Creator")
         self.assertTrue(a_info["created"])
@@ -147,13 +154,12 @@ class RoomLifecycleIntegrationTests(AioHTTPTestCase):
         room = self.registry.rooms[code]
         self.assertEqual(len(room.online()), 3)
 
-        # Creator departure does not expire the room or interrupt the two
-        # remaining sockets: the server must still forward targeted signaling.
+        # Original creator can leave and B/C still communicate.
         await a.close()
         self.assertEqual((await b.receive_json(timeout=2))["type"], "peer-offline")
         self.assertEqual((await c.receive_json(timeout=2))["type"], "peer-offline")
         self.assertEqual(len(room.online()), 2)
-        self.assertIsNone(room.empty_at)
+        self.assertIs(self.registry.rooms[code], room)
         await b.send_json({"type": "signal", "to": c_info["id"],
                            "toGeneration": c_info["generation"],
                            "signal": {"type": "offer", "attempt": 1, "sdp": "test-offer"}})
@@ -164,34 +170,32 @@ class RoomLifecycleIntegrationTests(AioHTTPTestCase):
 
         await b.close()
         self.assertEqual((await c.receive_json(timeout=2))["type"], "peer-offline")
+        self.assertIs(self.registry.rooms[code], room)
         await c.close()
-        await self.until(lambda: room.empty_at == self.now[0])
-        self.assertIs(self.registry.rooms[code], room)
+        await self.until(lambda: code not in self.registry.rooms)
 
-        # A valid browser session resumes the same identity and room during
-        # the 2-minute grace window, resetting the idle expiry clock.
-        self.now[0] += 119
-        resumed, resumed_info = await self.enter(code, "Member B", b_info)
-        self.assertFalse(resumed_info["created"])
-        self.assertEqual(resumed_info["id"], b_info["id"])
-        self.assertNotEqual(resumed_info["generation"], b_info["generation"])
-        self.assertIs(self.registry.rooms[code], room)
-        self.assertIsNone(room.empty_at)
-        await resumed.close()
-        await self.until(lambda: room.empty_at == self.now[0])
-
-        # The room remains reserved up to but not including 120s idle.
-        self.now[0] += 119
-        self.registry.sweep()
-        self.assertIs(self.registry.rooms[code], room)
-        self.now[0] += 1
-        fresh, new_info = await self.enter(code, "New Member", b_info)
+        # Re-entering the same code immediately creates a fresh room, even if
+        # the browser offers a once-valid member session from the closed room.
+        fresh, new_info = await self.enter(code, "Member B", b_info)
         self.assertTrue(new_info["created"])
         self.assertNotEqual(new_info["id"], b_info["id"])
         self.assertEqual(new_info["peers"], [])
-        self.assertIsNot(self.registry.rooms[code], room)
-        self.assertEqual(len(self.registry.rooms[code].members), 1)
+        new_room = self.registry.rooms[code]
+        self.assertIsNot(new_room, room)
+
+        # While someone remains online, another former member can join. The
+        # old room token must not revive a member ID from the destroyed room.
+        rejoined, rejoined_info = await self.enter(code, "Creator", a_info)
+        self.assertFalse(rejoined_info["created"])
+        self.assertNotEqual(rejoined_info["id"], a_info["id"])
+        self.assertEqual(len(rejoined_info["peers"]), 1)
+        self.assertIs(self.registry.rooms[code], new_room)
+        self.assertEqual((await fresh.receive_json(timeout=2))["type"], "peer-online")
         await fresh.close()
+        await self.until(lambda: len(new_room.online()) == 1)
+        self.assertIs(self.registry.rooms[code], new_room)
+        await rejoined.close()
+        await self.until(lambda: code not in self.registry.rooms)
 
 
 class SignallingTests(AioHTTPTestCase):
@@ -464,21 +468,25 @@ class SignallingTests(AioHTTPTestCase):
         self.assertEqual(unavailable["id"], "missing")
         await a.close()
 
-    async def test_resume_and_origin_rejection(self):
+    async def test_new_room_after_last_disconnect_and_origin_rejection(self):
         origin = {"Origin": str(self.server.make_url("/"))[:-1]}
         a = await self.client.ws_connect("/ws", headers=origin)
         await a.send_json({"type": "enter", "code": "5832", "name": "PC"})
         original = await a.receive_json()
         await a.close()
-        await asyncio.sleep(0.03)
-        resumed = await self.client.ws_connect("/ws", headers=origin)
-        await resumed.send_json({"type": "enter", "code": original["code"], "name": "PC",
-                                 "id": original["id"], "token": original["token"]})
-        response = await resumed.receive_json()
+        for _ in range(100):
+            if "5832" not in self.app["registry"].rooms:
+                break
+            await asyncio.sleep(0.01)
+        self.assertNotIn("5832", self.app["registry"].rooms)
+        rejoined = await self.client.ws_connect("/ws", headers=origin)
+        await rejoined.send_json({"type": "enter", "code": original["code"], "name": "PC",
+                                  "id": original["id"], "token": original["token"]})
+        response = await rejoined.receive_json()
         self.assertEqual(response["type"], "welcome")
-        self.assertEqual(response["id"], original["id"])
-        self.assertFalse(response["created"])
-        await resumed.close()
+        self.assertNotEqual(response["id"], original["id"])
+        self.assertTrue(response["created"])
+        await rejoined.close()
         bad = await self.client.get("/ws", headers={"Origin": "https://attacker.example"})
         self.assertEqual(bad.status, 403)
 

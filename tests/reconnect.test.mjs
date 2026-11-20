@@ -839,7 +839,7 @@ test('ordinary diagnostics distinguish new room, existing-room join and authenti
   assert.ok(!diagnostic.includes('5832'));
 });
 
-test('unexpected disconnect re-enters same room with identity and staged files', async () => {
+test('unexpected disconnect can create same-code room with new identity and retained local files', async () => {
   const t = harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
   const ws1 = t.FakeWebSocket.sockets[0];
@@ -869,8 +869,14 @@ test('unexpected disconnect re-enters same room with identity and staged files',
   assert.equal(ws2.sent[0].code,'5832');
   assert.equal(ws2.sent[0].id,'local-id');
   assert.equal(ws2.sent[0].token,'local-token');
-  await t.run('handleServer({type:"welcome",code:"5832",id:"local-id",token:"local-token",generation:"gen-2",name:"Amber Fox",peers:[]})');
+  // If this was the only online room member, the server immediately closed
+  // the room; reconnection creates a fresh same-code room with a new identity.
+  await t.run('handleServer({type:"welcome",code:"5832",id:"new-id",token:"new-token",generation:"gen-2",name:"Amber Fox",peers:[],created:true})');
   assert.equal(t.state.generation,'gen-2');
+  assert.equal(t.state.id,'new-id');
+  assert.equal(t.state.token,'new-token');
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'created');
+  assert.match(t.elements.get('feedback').textContent,/创建新房间/);
   assert.equal(t.state.ownOffers.length,1);
   assert.equal(t.state.outbound.get('offer-1').get('f1'),file);
   assert.equal(t.timers.size,0);

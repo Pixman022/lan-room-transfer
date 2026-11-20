@@ -19,7 +19,6 @@ from aiohttp import WSMsgType, web
 
 ROOT = Path(__file__).resolve().parent
 CODE_RE = re.compile(r"^[A-Z0-9]{4,16}$")
-ROOM_IDLE_SECONDS = 120
 MAX_ONLINE_MEMBERS = 10
 MAX_MESSAGE_BYTES = 65536
 
@@ -38,13 +37,9 @@ class Room:
     code: str
     created_at: float
     members: dict[str, Member] = field(default_factory=dict)
-    empty_at: float | None = None
 
     def online(self):
         return [member for member in self.members.values() if member.ws is not None and not member.ws.closed]
-
-    def is_closed(self, now):
-        return self.empty_at is not None and now - self.empty_at >= ROOM_IDLE_SECONDS
 
 
 class RoomRegistry:
@@ -61,9 +56,8 @@ class RoomRegistry:
         return code
 
     def sweep(self):
-        now = self.clock()
         for code, room in list(self.rooms.items()):
-            if room.is_closed(now):
+            if not room.online():
                 del self.rooms[code]
 
     def suggest_code(self):
@@ -103,7 +97,6 @@ class RoomRegistry:
             raise ValueError("设备名称长度应为 1–40 字符")
         member = Member(id=secrets.token_urlsafe(12), token=secrets.token_urlsafe(32), name=name.strip(), ws=ws)
         room.members[member.id] = member
-        room.empty_at = None
         return member
 
     def resume(self, code, id_, token, ws):
@@ -120,15 +113,16 @@ class RoomRegistry:
             raise ValueError("房间在线设备已达到上限")
         member.ws = ws
         member.generation = secrets.token_urlsafe(8)
-        room.empty_at = None
         return room, member
 
     def leave(self, room, member, ws):
         if member.ws is not ws:
             return
         member.ws = None
-        if not room.online():
-            room.empty_at = self.clock()
+        # An empty room is immediately released. The identity check prevents a
+        # stale close callback from deleting a newly created same-code room.
+        if not room.online() and self.rooms.get(room.code) is room:
+            del self.rooms[room.code]
 
 
 async def send(ws, payload):
