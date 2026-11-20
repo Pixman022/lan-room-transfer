@@ -123,7 +123,8 @@ function sendSignal(to, signal) {
 // Privacy-reduced counters expose control-flow failures without file IDs,
 // names, room codes, candidate addresses or packet payloads.
 const TRANSFER_CONTROLS = new Set(['request-file', 'file-request-ack', 'file-start', 'file-end', 'file-error',
-  'cancel-file', 'file-canceled', 'route-proof-request', 'route-proof']);
+  'cancel-file', 'file-canceled', 'route-proof-request', 'route-proof',
+  'file-list', 'file-list-request']);
 function countTransfer(peer, event) {
   if (!peer) return;
   peer.transferEvents ??= {};
@@ -435,7 +436,8 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   const pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
   const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
     pc, channel: null, verified: false, remoteReady: false, remoteHostPairVerified: false, localReadySent: false,
-    ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(), routeInfo: null,
+    ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(),
+    catalogRequested: false, routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
     startedAt: Date.now(), firstAttemptStartedAt, readyAt: null, connectTimer: null,
@@ -643,6 +645,7 @@ async function verifyPeerPath(peer) {
       clearTimeout(peer.connectTimer);
     }
     syncSharedOffers(peer);
+    requestSharedOffers(peer);
   }
   renderPeers();
   return peer.verified;
@@ -712,10 +715,12 @@ async function receiveChannel(peer, data) {
       clearTimeout(peer.connectTimer);
     }
     syncSharedOffers(peer);
+    requestSharedOffers(peer);
     renderPeers();
     return;
   }
   if (!peer.ready) {
+    if (msg.kind === 'file-list') countTransfer(peer, 'catalog-ignored-unready');
     if (TRANSFER_CONTROLS.has(msg.kind)) countTransfer(peer, 'control-ignored-unready');
     return;
   }
@@ -732,6 +737,11 @@ async function receiveChannel(peer, data) {
     }
   } else if (msg.kind === 'route-proof') {
     peer.remoteHostPairVerified = msg.hostHostVerified === true;
+  } else if (msg.kind === 'file-list-request') {
+    // This peer finished its own route verification after our first catalog
+    // announcement. Replay only over the already-verified P2P channel.
+    peer.syncedOffers.clear();
+    syncSharedOffers(peer);
   } else if (msg.kind === 'file-list') {
     if (typeof msg.offerId !== 'string' || !Array.isArray(msg.files) || msg.files.length > MAX_FILES ||
         msg.files.some(f => typeof f.id !== 'string' || typeof f.name !== 'string' ||
@@ -1004,6 +1014,12 @@ function retryJob(job) {
   state.queue.push(job); renderJobs(); renderRequests(); startNext();
 }
 
+// Each receiver asks for the current file catalog once it has independently
+// verified the P2P link. Early announcements may have been ignored before then.
+function requestSharedOffers(peer) {
+  if (!peer?.ready || peer.catalogRequested) return;
+  if (sendPeer(peer, { kind: 'file-list-request' })) peer.catalogRequested = true;
+}
 // File objects remain in the uploader's browser; the signalling server stores none.
 // Each verified peer gets the current room file catalog, including later joiners.
 function syncSharedOffers(peer) {
@@ -1151,6 +1167,11 @@ function diagnosticsSnapshot() {
         lastPathRecheckEvidence: peer.lastRouteCheckEvidence || null,
         pathProofRequestsSent: peer.transferEvents?.['route-proof-request:sent'] || 0,
         pathProofRepliesReceived: peer.transferEvents?.['route-proof:received'] || 0,
+        catalogsSent: peer.transferEvents?.['file-list:sent'] || 0,
+        catalogsReceived: peer.transferEvents?.['file-list:received'] || 0,
+        catalogsIgnoredBeforeReady: peer.transferEvents?.['catalog-ignored-unready'] || 0,
+        catalogRequestsSent: peer.transferEvents?.['file-list-request:sent'] || 0,
+        catalogRequestsReceived: peer.transferEvents?.['file-list-request:received'] || 0,
         ignoredStarts: peer.transferEvents?.['start-ignored-mismatch'] || 0,
         ignoredErrors: peer.transferEvents?.['error-ignored-mismatch'] || 0,
         lastEvent: peer.lastTransferEvent || 'none',
