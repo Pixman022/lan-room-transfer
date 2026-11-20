@@ -26,6 +26,23 @@ with sync_playwright() as playwright:
         errors = []
         page.on('pageerror', lambda exc: errors.append(str(exc)))
         page.set_content(html)
+        # Pairing page hierarchy: avatar, room code, then compact editable device tag.
+        assert page.evaluate('''() => [...document.querySelector('.entry-panel').children]
+            .map(node => node.className).join('|')''') == (
+                'entry-avatar|entry-room-code|entry-device-chip|primary wide')
+        avatar = page.locator('.entry-avatar').bounding_box()
+        code = page.locator('.entry-room-code').bounding_box()
+        chip = page.locator('.entry-device-chip').bounding_box()
+        enter = page.locator('#enter-room').bounding_box()
+        assert avatar and code and chip and enter
+        assert avatar['y'] + avatar['height'] <= code['y']
+        assert code['y'] + code['height'] <= chip['y']
+        assert chip['y'] + chip['height'] <= enter['y']
+        assert chip['width'] < code['width'], 'current-device tag should stay compact'
+        assert page.locator('.entry-avatar #home-device-avatar').count() == 1
+        assert page.locator('.entry-device-chip #edit-home-device-name').count() == 1
+        assert '当前设备' in page.locator('.entry-device-chip').inner_text()
+        assert page.locator('.entry-room-code label').inner_text() == '房间号'
         assert re.fullmatch(r'\d{4}', page.locator('#room-code-input').input_value())
         assert page.locator('#device-name').count() == 0
         assert page.locator('#room-device-name').count() == 0
