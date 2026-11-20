@@ -437,7 +437,7 @@ async function createPeer(id, name, initiator, generation, attempt = initiator ?
   const peer = { id, name, generation, initiator, attempt, retryRequests: 0,
     pc, channel: null, verified: false, remoteReady: false, remoteHostPairVerified: false, localReadySent: false,
     ready: false, reason: '正在建立连接', candidates: [], sending: new Map(), syncedOffers: new Set(),
-    catalogRequested: false, routeInfo: null,
+    catalogRequested: false, catalogReplayDone: false, routeInfo: null,
     stage: initiator ? 'preparing-offer' : 'waiting-offer', localSdpSent: false,
     localCandidates: [], candidateCount: 0, acceptedCandidates: 0, rejectedCandidates: 0,
     startedAt: Date.now(), firstAttemptStartedAt, readyAt: null, connectTimer: null,
@@ -739,7 +739,9 @@ async function receiveChannel(peer, data) {
     peer.remoteHostPairVerified = msg.hostHostVerified === true;
   } else if (msg.kind === 'file-list-request') {
     // This peer finished its own route verification after our first catalog
-    // announcement. Replay only over the already-verified P2P channel.
+    // announcement. Replay once, only over the verified P2P channel.
+    if (peer.catalogReplayDone) return;
+    peer.catalogReplayDone = true;
     peer.syncedOffers.clear();
     syncSharedOffers(peer);
   } else if (msg.kind === 'file-list') {
