@@ -1462,7 +1462,7 @@ test('early remote ready is accepted after local path verification and local rea
   assert.equal(peer.ready,true);
   assert.notEqual(t.run('diagnosticsSnapshot().peers[0].timeToReadySeconds'),null);
   assert.equal(t.timers.size,0);
-  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.deepEqual(channel.sent,[{kind:'ready'},{kind:'file-list-request'}]);
 });
 
 test('phone selected host/prflx is gated until PC ready then completes reciprocal handshake', async () => {
@@ -1503,7 +1503,7 @@ test('phone selected host/prflx is gated until PC ready then completes reciproca
   assert.equal(peer.localReadySent,true);
   assert.equal(peer.ready,true);
   assert.equal(peer.routeInfo.code,'masked-host-prflx-p2p');
-  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.deepEqual(channel.sent,[{kind:'ready'},{kind:'file-list-request'}]);
   assert.equal(t.run('diagnosticsSnapshot().peers[0].canTransfer'),true);
   assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,true,
     'transfer-time recheck must use same approved path policy');
@@ -1576,7 +1576,7 @@ test('fully masked host/prflx stays blocked for legacy ready, then unlocks after
   assert.equal(peer.localReadySent,true);
   assert.equal(peer.ready,true);
   assert.equal(peer.routeInfo.code,'masked-host-prflx-reciprocal-p2p');
-  assert.deepEqual(channel.sent,[{kind:'ready'}]);
+  assert.deepEqual(channel.sent,[{kind:'ready'},{kind:'file-list-request'}]);
   assert.equal(t.run('diagnosticsSnapshot().peers[0].remoteHostPairVerified'),true);
   assert.equal((await t.run('inspectPeerPath(state.peers.get("pc"))')).allowed,true);
   stats.get('r').candidateType='relay';
