@@ -2097,3 +2097,108 @@ test('device name is edited inline in home and room without standalone name inpu
   assert.equal(room.textContent, 'Peach Panda', 'invalid empty name reverts');
   assert.equal(t.FakeWebSocket.sockets[0].sent.length, sentCount, 'invalid name not signaled');
 });
+
+
+test('entry button shows connecting progress, blocks repeat clicks and resets after welcome or failure', async () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.match(html, /id="entry-loading-icon"/);
+  assert.match(html, /id="entry-button-label"/);
+  const t = harness();
+  const button = t.elements.get('enter-room');
+  const icon = t.elements.get('entry-loading-icon');
+  const label = t.elements.get('entry-button-label');
+  t.run("document.getElementById('enter-room').onclick()");
+  assert.equal(button.disabled, true, 'button disabled while joining');
+  assert.equal(icon.hidden, false, 'spinner visible while joining');
+  assert.equal(label.textContent, '正在连接房间…');
+  button.onclick();
+  assert.equal(t.FakeWebSocket.sockets.length, 1, 'second click does not create a second socket');
+  await join(t, t.FakeWebSocket.sockets[0]);
+  assert.equal(button.disabled, false, 'button reset when room welcomes device');
+  assert.equal(icon.hidden, true);
+  assert.equal(label.textContent, '进入房间');
+
+  const failed = harness();
+  failed.run("document.getElementById('enter-room').onclick()");
+  const socket = failed.FakeWebSocket.sockets[0];
+  socket.open();
+  await failed.run("handleServer({type:'error',message:'房间已满'})");
+  socket.emit('close');
+  assert.equal(failed.elements.get('enter-room').disabled, false, 'rejected entry restores retry');
+  assert.equal(failed.elements.get('entry-loading-icon').hidden, true);
+  assert.equal(failed.elements.get('entry-button-label').textContent, '进入房间');
+});
+
+test('top status dot retains text and tracks disconnected, waiting and ready state', () => {
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /connection-status::before/);
+  assert.match(css, /connection-status\[data-state='waiting'\]::before/);
+  assert.match(css, /connection-status\[data-state='ready'\]::before/);
+  const t = harness();
+  const status = t.elements.get('connection-status');
+  t.run('showRoom(false)');
+  assert.equal(status.dataset.state, 'offline');
+  assert.equal(status.textContent, '未连接');
+  t.run('showRoom(true)');
+  assert.equal(status.dataset.state, 'waiting');
+  t.state.ws = {readyState: 1};
+  t.state.generation = 'gen-1';
+  t.run('updateConnectionSummary()');
+  assert.equal(status.dataset.state, 'waiting');
+  assert.equal(status.textContent, '房间已连接');
+  t.state.peers.set('other', {ready: true});
+  t.run('updateConnectionSummary()');
+  assert.equal(status.dataset.state, 'ready');
+  assert.equal(status.textContent, '文件直连就绪');
+});
+
+test('room file rows merge receive, transfer progress and saved download without duplicates', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.match(html, /id="incoming-requests"/);
+  assert.doesNotMatch(html, /id="transfer-jobs"/);
+  const t = harness();
+  const root = t.elements.get('incoming-requests');
+  root.children = [];
+  root.replaceChildren = (...nodes) => { root.children = [...nodes]; };
+  root.append = (...nodes) => { root.children.push(...nodes); };
+  t.run("document.createElement = tag => ({tag,children:[],style:{},className:'',textContent:'',append(...nodes){this.children.push(...nodes)},replaceChildren(...nodes){this.children=[...nodes]},addEventListener(){}})");
+  t.state.peers.set('p', {id:'p',name:'Peer One',ready:true});
+  const offer={peerId:'p',offerId:'o',files:[{id:'f',name:'payload.bin',size:100,status:'pending'}]};
+  t.state.offers.set('p:o', offer);
+
+  const view = () => {
+    const groups = root.children;
+    const rows = groups.flatMap(group => group.children.filter(node => node.className.includes('file-row')));
+    const row = rows[0];
+    const info = row?.children[1];
+    const action = row?.children[2]?.children[0];
+    return {groups:groups.length,rows:rows.length,name:info?.children[0]?.textContent,
+      state:info?.children[1]?.textContent,progress:info?.children[2]?.children[0]?.style.width,
+      action:action?.textContent,download:action?.download};
+  };
+  t.run('renderRoomFiles()');
+  assert.equal(view().groups, 1);
+  assert.equal(view().rows, 1);
+  assert.equal(view().name, 'payload.bin');
+  assert.equal(view().action, '接收');
+
+  offer.files[0].status='queued';
+  const job={peerId:'p',offerId:'o',fileId:'f',name:'payload.bin',size:100,
+    received:50,chunks:[],status:'传输中',url:null,cancelled:false};
+  t.state.jobs.push(job); t.state.active=job;
+  t.run('renderRoomFiles()');
+  assert.equal(view().rows, 1);
+  assert.equal(view().progress, '50%');
+  assert.equal(view().action, '取消');
+
+  job.received=100; job.status='校验通过，点击保存'; job.url='blob:saved';
+  offer.files[0].status='complete'; t.state.active=null;
+  t.run('renderRoomFiles()');
+  assert.equal(view().rows, 1);
+  assert.equal(view().action, '保存');
+  assert.equal(view().download, 'payload.bin');
+  t.state.offers.clear();
+  t.run('renderRoomFiles()');
+  assert.equal(view().rows, 1, 'saved file stays reachable after offer disappears');
+  assert.equal(view().action, '保存');
+});
