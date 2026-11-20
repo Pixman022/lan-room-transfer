@@ -60,6 +60,11 @@ with sync_playwright() as playwright:
         assert page.locator('#home-device-label').inner_text() == 'Coral Fox'
         assert page.locator('#home-device-label').get_attribute('contenteditable') == 'false'
         assert page.locator('#home-device-avatar').inner_text() == '🦊'
+        assert page.locator('#toast').is_visible()
+        assert page.locator('#toast-message').inner_text() == '设备名称已修改'
+        assert page.locator('#toast').get_attribute('role') == 'status'
+        bounds = page.locator('#toast').bounding_box()
+        assert bounds and bounds['x'] >= 0 and bounds['x'] + bounds['width'] <= width
         # Enter-room progress lives inside the button and prevents double entry.
         page.evaluate('setEntryLoading(true)')
         assert page.locator('#enter-room').is_disabled()
@@ -102,8 +107,16 @@ with sync_playwright() as playwright:
         assert page.locator('.room-actions #copy-code').count() == 0
         assert page.locator('.room-actions button').count() == 1
         assert page.locator('.room-actions button').inner_text() == '退出'
+        page.evaluate('''() => {
+            Object.defineProperty(navigator, 'clipboard', {
+                configurable: true,
+                value: {writeText: async text => { window.__copiedRoom = text; }}
+            });
+        }''')
         page.locator('#copy-code').click()
-        assert page.locator('#feedback').inner_text() in ('房间码已复制', '房间码：HOME2026')
+        page.wait_for_function("document.getElementById('toast-message').textContent === '房间号已复制'")
+        assert page.evaluate('window.__copiedRoom') == 'HOME2026'
+        assert page.locator('#toast').is_visible()
         assert page.locator('#peer-list .device-row').count() == 0
         assert page.locator('#drop-target').count() == 0
         assert page.locator('#peer-list button').count() == 0
@@ -215,6 +228,8 @@ with sync_playwright() as playwright:
         page.locator('#my-device-label').fill('Peach Panda')
         page.locator('#my-device-label').press('Enter')
         assert page.locator('#my-device-label').inner_text() == 'Peach Panda'
+        assert page.locator('#toast-message').inner_text() == '设备名称已修改'
+        assert page.locator('#toast').is_visible()
         assert page.locator('#home-device-label').inner_text() == 'Peach Panda'
         assert page.locator('#my-device-avatar').inner_text() == '🐼'
 
