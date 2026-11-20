@@ -442,6 +442,8 @@ test('MULTI-03 QA: three locally armed browsers start their existing receive job
     clients[id].run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
     await join(clients[id],clients[id].FakeWebSocket.sockets[0]);
     assert.equal(clients[id].run('QA_MODE'),true);
+    assert.equal(clients[id].elements.get('qa-panel').hidden,false,
+      'QA controls appear only when explicitly enabled');
   }
   async function link(leftId,rightId) {
     const left=clients[leftId],right=clients[rightId];
@@ -521,6 +523,8 @@ test('MULTI-03 QA: unarmed, non-QA, stale and duplicate P2P start controls never
   await receiver.run('receiveChannel(state.peers.get("sender"),JSON.stringify({kind:"qa-start",delayMs:6000}))');
   assert.equal(receiver.state.jobs.length,0);
   assert.equal(receiver.run('QA_MODE'),false);
+  assert.equal(receiver.elements.get('qa-panel').hidden,true,
+    'normal room screen does not show test controls');
   assert.equal(receiver.run('qaTimer'),null);
 
   const qa=harness({qa:true});
