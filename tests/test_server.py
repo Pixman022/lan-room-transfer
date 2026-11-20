@@ -18,8 +18,7 @@ class ClosedSocketTests(unittest.IsolatedAsyncioTestCase):
 
 class RoomUnitTests(unittest.TestCase):
     def test_first_enter_creates_following_enter_joins_and_code_is_reusable(self):
-        now = [1000.0]
-        rooms = RoomRegistry(clock=lambda: now[0])
+        rooms = RoomRegistry()
         class StubWs:
             closed = False
         room, first, created = rooms.enter("home2026", "Laptop", StubWs())
@@ -62,8 +61,7 @@ class RoomUnitTests(unittest.TestCase):
         self.assertNotIn("1234", rooms.rooms)
 
     def test_owner_departure_does_not_end_room_but_last_departure_closes_it(self):
-        now = [1000.0]
-        rooms = RoomRegistry(clock=lambda: now[0])
+        rooms = RoomRegistry()
         class StubWs:
             closed = False
         ws_a, ws_b = StubWs(), StubWs()
@@ -118,8 +116,7 @@ class RoomUnitTests(unittest.TestCase):
 
 class RoomLifecycleIntegrationTests(AioHTTPTestCase):
     async def get_application(self):
-        self.now = [1000.0]
-        self.registry = RoomRegistry(clock=lambda: self.now[0])
+        self.registry = RoomRegistry()
         return create_app(registry=self.registry)
 
     async def enter(self, code, name, previous=None):
@@ -134,8 +131,8 @@ class RoomLifecycleIntegrationTests(AioHTTPTestCase):
         return ws, welcome
 
     async def until(self, predicate):
-        # WebSocket close callbacks run asynchronously. Wait for cleanup, not
-        # for the 120-second test clock to elapse in real time.
+        # WebSocket close callbacks run asynchronously. Wait for teardown,
+        # rather than assuming the close handler has already completed.
         for _ in range(100):
             if predicate():
                 return
