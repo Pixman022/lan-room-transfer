@@ -25,7 +25,7 @@ const signalHealth = { sent: 0, acksReceived: 0, timeouts: 0, disconnects: 0, re
   lastDisconnect: null };
 const TRANSFER_IDLE_MS = 30000;
 const FULL_DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search || '');
-const QA_MODE = /(?:^|[?&])qa=1(?:&|$)/.test(location.search || '');
+let QA_MODE = /(?:^|[?&])qa=1(?:&|$)/.test(location.search || '');
 const QA_START_DELAY_MS = 6000;
 let qaArmed = null;
 let qaTimer = null;
@@ -1794,12 +1794,23 @@ function renderJobs() {
 }
 
 $('qa-panel').hidden = !QA_MODE;
-if (QA_MODE) {
-  $('qa-arm').onclick = qaArmSelected;
-  $('qa-start').onclick = qaStartAll;
-  $('qa-cancel').onclick = qaCancelPlan;
+$('qa-enable').hidden = QA_MODE;
+$('qa-enable').onclick = () => {
+  // The room toolbar makes QA discoverable without manually editing the URL.
+  // Opt-in is local to this page and never starts a transfer by itself.
+  QA_MODE = true;
+  $('qa-panel').hidden = false;
+  $('qa-enable').hidden = true;
+  $('qa-enable').setAttribute('aria-expanded', 'true');
   qaRender();
-}
+  renderDiagnostics();
+  feedback('并发验收已开启：请在上方先选择文件并点击“准备接收”');
+  $('qa-panel').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+};
+$('qa-arm').onclick = qaArmSelected;
+$('qa-start').onclick = qaStartAll;
+$('qa-cancel').onclick = qaCancelPlan;
+if (QA_MODE) qaRender();
 
 $('device-name').value = deviceName();
 $('room-device-name').value = deviceName();
