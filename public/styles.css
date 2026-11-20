@@ -68,14 +68,11 @@ main { min-height: calc(100vh - 76px); }
 .home-intro { text-align: center; margin: 0 0 28px; }
 .home-intro h1 { font-size: clamp(28px, 4vw, 37px); letter-spacing: -.045em; line-height: 1.25; margin: 0; }
 .entry-panel { padding: 30px; }
-.entry-avatar { display: flex; justify-content: center; margin: 2px 0 22px; }
-.entry-room-code label { text-align: center; }
-.entry-panel .room-code-editor { margin-bottom: 16px; }
-.entry-device-chip { display: flex; align-items: center; justify-content: center; gap: 8px; width: fit-content; max-width: 100%; min-height: 36px; padding: 2px 6px 2px 12px; margin: 0 auto 24px; border: 1px solid var(--line); border-radius: 999px; background: var(--tint-blue); color: var(--tint-blue-ink); }
-.entry-device-caption { flex-shrink: 0; font-size: 11px; color: var(--muted); }
-.entry-device-chip .device-name-line { min-width: 0; }
-.entry-device-chip .device-name-text { font-size: 13px; font-weight: 650; letter-spacing: 0; max-width: min(46vw, 250px); }
-.entry-device-chip .edit-name-button { color: var(--tint-blue-ink); }
+.entry-avatar { display: flex; justify-content: center; margin: 2px 0 10px; }
+.entry-device { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; margin: 0 auto 28px; }
+.entry-device .device-name-line { justify-content: center; max-width: 100%; }
+.entry-device .device-name-text { font-size: 20px; font-weight: 720; max-width: min(65vw, 360px); text-align: center; }
+.entry-device-chip { display: inline-flex; align-items: center; justify-content: center; padding: 4px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--tint-blue); color: var(--tint-blue-ink); font-size: 11px; line-height: 1.35; }
 .identity-copy strong { font-size: 20px; line-height: 1.25; font-weight: 720; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .avatar { display: grid; place-items: center; border-radius: 50%; flex-shrink: 0; background: var(--tint-blue); border: 2px solid var(--line-strong); font-size: 31px; }
 .avatar-lg { width: 70px; height: 70px; }
