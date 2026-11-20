@@ -976,7 +976,6 @@ async function receiveChannel(peer, data) {
     // A file-start already in transit must not undo a user's cancellation.
     if (job.cancelled) return;
     job.status = '传输中'; job.received = 0; job.chunks = [];
-    job.wireStartedAt = Date.now();
     armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时'); renderJobs();
   } else if (msg.kind === 'file-end') {
     const job = state.active;
@@ -988,7 +987,6 @@ async function receiveChannel(peer, data) {
     if (job.status !== '传输中') return;
     if (job.received !== job.size) { failActive('文件大小不匹配'); return; }
     if (!isSha256Hex(msg.sha256)) { failActive('发送端缺少有效校验值，请双方刷新后重试'); return; }
-    job.wireEndedAt = Date.now();
     job.status = '校验中';
     armJobTimer(job, TRANSFER_IDLE_MS, '文件校验超时');
     renderJobs();
@@ -1021,6 +1019,10 @@ function handleBinary(peer, data) {
   if (!peer.ready || !job || job.peerId !== peer.id || job.status !== '传输中' || !(data instanceof ArrayBuffer)) return;
   if (data.byteLength > CHUNK_SIZE || job.received + data.byteLength > job.size) { failActive('数据块超过允许大小'); return; }
   if (!job.cancelled) job.chunks.push(data);
+  if (QA_MODE && data.byteLength > 0) {
+    if (job.wireFirstByteAt === undefined) job.wireFirstByteAt = Date.now();
+    job.wireLastByteAt = Date.now();
+  }
   job.received += data.byteLength;
   armJobTimer(job, TRANSFER_IDLE_MS, '传输停滞超时');
   renderJobs();
@@ -1459,10 +1461,10 @@ function diagnosticsSnapshot() {
       // filename, member ID, room code and address are intentionally omitted.
       receiveWindows: state.jobs.filter(job => job.qaTriggerAt !== undefined).slice(-6).map(job => ({
         sizeBytes: job.size, status: job.status,
-        firstByteAfterTriggerMs: job.wireStartedAt === undefined ? null
-          : job.wireStartedAt - job.qaTriggerAt,
-        lastByteAfterTriggerMs: job.wireEndedAt === undefined ? null
-          : job.wireEndedAt - job.qaTriggerAt,
+        firstByteAfterTriggerMs: job.wireFirstByteAt === undefined ? null
+          : job.wireFirstByteAt - job.qaTriggerAt,
+        lastByteAfterTriggerMs: job.wireLastByteAt === undefined ? null
+          : job.wireLastByteAt - job.qaTriggerAt,
       })),
     }} : {}),
     peers: [...state.peers.values()].map((peer, index) => ({
