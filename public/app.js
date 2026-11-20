@@ -107,9 +107,17 @@ function feedback(text, error = false) {
   $('feedback').textContent = text;
   $('feedback').className = error ? 'feedback error' : 'feedback';
 }
+function setEntryLoading(loading) {
+  $('enter-room').disabled = loading;
+  $('enter-room').setAttribute('aria-busy', String(loading));
+  $('entry-loading-icon').hidden = !loading;
+  $('entry-button-arrow').hidden = loading;
+  $('entry-button-label').textContent = loading ? '正在连接房间…' : '进入房间';
+}
 function showRoom(visible) {
   $('room-screen').hidden = !visible;
   $('home-screen').hidden = visible;
+  if (visible) setEntryLoading(false);
   updateConnectionSummary();
 }
 function updateConnectionSummary() {
@@ -299,7 +307,8 @@ function scheduleReconnect(action) {
 function connect(action) {
   if (state.ws && state.ws.readyState < WebSocket.CLOSING) return;
   stopReconnect();
-  feedback(state.code ? '正在恢复房间连接…' : '正在连接协调服务…');
+  if (!state.code) setEntryLoading(true);
+  feedback(state.code ? '正在恢复房间连接…' : '正在连接房间…');
   state.leaving = false;
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${scheme}://${location.host}/ws`);
@@ -316,6 +325,7 @@ function connect(action) {
     state.ws = null;
     qaCancelPlan();
     const wasJoined = Boolean(state.code);
+    if (!wasJoined) setEntryLoading(false);
     state.generation = '';
     const oldPeers = [...state.peers.values()];
     state.peers.clear();
@@ -1921,6 +1931,7 @@ codeInput.oninput = event => {
   event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
 };
 $('enter-room').onclick = () => {
+  if ($('enter-room').disabled) return;
   try {
     const code = normalizeRoomCode(codeInput.value);
     const name = deviceName();
@@ -1928,7 +1939,10 @@ $('enter-room').onclick = () => {
     const session = remembered();
     if (session?.code === code) { action.id = session.id; action.token = session.token; }
     connect(action);
-  } catch (e) { feedback(e.message, true); }
+  } catch (e) {
+    setEntryLoading(false);
+    feedback(e.message, true);
+  }
 };
 $('leave-room').onclick = () => {
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
@@ -1946,6 +1960,7 @@ $('leave-room').onclick = () => {
   for (const peer of state.peers.values()) { clearTimeout(peer.connectTimer); peer.pc.close(); }
   state.peers.clear();
   state.code = ''; state.generation = ''; state.lastRoomEntry = null;
+  setEntryLoading(false);
   showRoom(false); renderPeers(); renderSentFiles(); feedback('已退出房间');
 };
 $('copy-code').onclick = async () => { try { await navigator.clipboard.writeText(state.code); feedback('房间码已复制'); } catch { feedback(`房间码：${state.code}`); } };
