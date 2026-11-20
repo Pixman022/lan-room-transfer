@@ -31,6 +31,8 @@ function harness({debug = false, realRoutePolicy = false, realChecksum = false} 
     return elements.get(id);
   };
   const timers = new Map();
+  const intervals = new Map();
+  let nextIntervalId = 0;
   let nextTimer = 0;
   const storage = new Map();
   const sessionStorage = {
@@ -112,6 +114,8 @@ function harness({debug = false, realRoutePolicy = false, realChecksum = false} 
     }),
     setTimeout: (cb, ms) => { const id = ++nextTimer; timers.set(id, {cb, ms}); return id; },
     clearTimeout: id => timers.delete(id),
+    setInterval: (cb, ms) => { const id=++nextIntervalId; intervals.set(id,{cb,ms}); return id; },
+    clearInterval: id => intervals.delete(id),
     queueMicrotask,
     fetch: async () => { throw Error('no test network'); },
     navigator: {userAgent: 'TestBrowser'}, crypto: {randomUUID: () => 'test-uuid'},
@@ -129,7 +133,7 @@ function harness({debug = false, realRoutePolicy = false, realChecksum = false} 
   });
   vm.runInContext(appSource, context, {filename:'app.js'});
   const run = expression => vm.runInContext(expression, context);
-  return {state: run('state'), run, timers, elements, FakeWebSocket, FakeRTCPeerConnection, debugMessages, savedBlobs};
+  return {state: run('state'), run, timers, intervals, elements, FakeWebSocket, FakeRTCPeerConnection, debugMessages, savedBlobs};
 }
 const join = async (t, socket, generation='gen-1') => {
   socket.open();
@@ -1760,4 +1764,66 @@ test('R05: unsafe current path rejects ready retransmissions without opening tra
   await t.run('receiveChannel(state.peers.get("other"),JSON.stringify({kind:"ready",requestReciprocal:true}))');
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(packets.filter(p=>p.kind==='ready').length,1,'unsafe path also rejects echo');
+});
+
+test('R06 idle solo room: silent WebSocket is detected and recreated without losing staged files', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const first=t.FakeWebSocket.sockets[0];
+  await join(t,first);
+  assert.equal(t.intervals.size,1,'idle joined room must have a heartbeat watchdog');
+  const offered={size:5};
+  t.state.ownOffers.push({offerId:'offer-1',files:[{id:'f1',name:'sample.txt',size:5}]});
+  t.state.outbound.set('offer-1',new Map([['f1',offered]]));
+  const beat=[...t.intervals.values()][0];
+  assert.equal(beat.ms,20000);
+  beat.cb();
+  const sent=first.sent.at(-1);
+  assert.equal(sent.type,'keepalive');
+  assert.equal(typeof sent.seq,'number');
+  assert.equal(t.run('diagnosticsSnapshot().signalKeepalive.pending'),true);
+  // A black-holed network can leave native WebSocket OPEN and never emit close.
+  first.close=()=>{first.readyState=first.constructor.CLOSING;};
+  beat.cb();
+  assert.equal(t.state.ws,null,'watchdog must not depend on native close');
+  assert.equal(t.run('diagnosticsSnapshot().signalKeepalive.timeouts'),1);
+  assert.equal(t.state.ownOffers.length,1);
+  assert.equal(t.state.outbound.get('offer-1').get('f1'),offered);
+  assert.equal(t.intervals.size,0,'do not keep old watchdog alive');
+  assert.equal([...t.timers.values()][0].ms,1000);
+  fireNextTimer(t);
+  const next=t.FakeWebSocket.sockets.at(-1);
+  next.open();
+  assert.equal(next.sent[0].id,'local-id');
+  await t.run('handleServer({type:"welcome",code:"5832",id:"new-id",token:"new-token",generation:"gen-2",name:"Amber Fox",peers:[],created:true})');
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'created');
+  assert.equal(t.run('diagnosticsSnapshot().localSharedFiles'),1);
+  assert.equal(t.run('diagnosticsSnapshot().signalKeepalive.timeouts'),1);
+  assert.equal(t.intervals.size,1);
+  first.emit('message',{data:JSON.stringify({type:'keepalive-ack',seq:sent.seq})});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(t.run('diagnosticsSnapshot().signalKeepalive.acksReceived'),0,'stale ack ignored');
+});
+
+test('R06 active idle socket replies to keepalive and manual Leave stops watchdog', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  const socket=t.FakeWebSocket.sockets[0];
+  await join(t,socket);
+  const tick=[...t.intervals.values()][0].cb;
+  tick();
+  const seq=socket.sent.at(-1).seq;
+  await t.run('handleServer({type:"keepalive-ack",seq:'+(seq+100)+'})');
+  assert.equal(t.run('diagnosticsSnapshot().signalKeepalive.pending'),true,'wrong ack is ignored');
+  await t.run('handleServer({type:"keepalive-ack",seq:'+seq+'})');
+  const healthy=t.run('diagnosticsSnapshot().signalKeepalive');
+  assert.equal(healthy.acksReceived,1);
+  assert.equal(healthy.timeouts,0);
+  assert.equal(healthy.pending,false);
+  tick();
+  assert.equal(socket.sent.at(-1).type,'keepalive');
+  assert.equal(t.state.ws,socket,'responsive socket remains connected');
+  t.run('document.getElementById("leave-room").onclick()');
+  assert.equal(t.intervals.size,0);
+  assert.equal(t.timers.size,0);
 });
