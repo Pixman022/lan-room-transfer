@@ -876,6 +876,7 @@ test('unexpected disconnect can create same-code room with new identity and reta
   assert.equal(t.state.id,'new-id');
   assert.equal(t.state.token,'new-token');
   assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'created');
+  assert.match(t.elements.get('feedback').textContent,/创建新房间/);
   assert.equal(t.state.ownOffers.length,1);
   assert.equal(t.state.outbound.get('offer-1').get('f1'),file);
   assert.equal(t.timers.size,0);
