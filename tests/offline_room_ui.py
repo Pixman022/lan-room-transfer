@@ -37,6 +37,30 @@ with sync_playwright() as playwright:
         assert page.locator('#home-device-label').inner_text() == 'Coral Fox'
         assert page.locator('#home-device-label').get_attribute('contenteditable') == 'false'
         assert page.locator('#home-device-avatar').inner_text() == '🦊'
+        # Enter-room progress lives inside the button and prevents double entry.
+        page.evaluate('setEntryLoading(true)')
+        assert page.locator('#enter-room').is_disabled()
+        assert page.locator('#entry-loading-icon').is_visible()
+        assert page.locator('#entry-button-label').inner_text() == '正在连接房间…'
+        assert page.locator('#entry-button-arrow').is_hidden()
+        page.evaluate('setEntryLoading(false)')
+        assert page.locator('#enter-room').is_enabled()
+        assert page.locator('#entry-loading-icon').is_hidden()
+        assert page.locator('#entry-button-label').inner_text() == '进入房间'
+        # Header status uses distinct offline/waiting/ready color dots.
+        status_colors = page.evaluate('''() => {
+            const status = document.getElementById('connection-status');
+            const color = () => getComputedStyle(status, '::before').backgroundColor;
+            status.dataset.state = 'offline';
+            const offline = color();
+            status.dataset.state = 'waiting';
+            const waiting = color();
+            status.dataset.state = 'ready';
+            const ready = color();
+            status.dataset.state = 'offline';
+            return [offline, waiting, ready];
+        }''')
+        assert len(set(status_colors)) == 3, f'connection dot colors indistinguishable: {status_colors}'
         page.locator('#room-code-input').fill('HOME2026')
         page.screenshot(path=str(ROOT / 'docs' / f'{label}-static.png'), full_page=True)
 
