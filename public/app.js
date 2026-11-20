@@ -18,6 +18,7 @@ const SIGNAL_KEEPALIVE_MS = 20000;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let signalKeepaliveTimer = null;
+let signalRecover = null;
 let signalKeepalivePending = null;
 let signalKeepaliveSequence = 0;
 const signalHealth = { sent: 0, acksReceived: 0, timeouts: 0, disconnects: 0, reconnectsScheduled: 0,
@@ -276,6 +277,7 @@ function connect(action) {
   const onDisconnected = (reason = 'socket-close') => {
     if (state.ws !== ws) return;
     stopSignalKeepalive();
+    signalRecover = null;
     if (reason !== 'keepalive-timeout' && reason !== 'keepalive-send-failed') {
       signalHealth.lastDisconnect = reason;
     }
@@ -305,18 +307,13 @@ function connect(action) {
     }
     renderPeers(); renderRequests(); renderJobs(); renderSentFiles();
   };
+  signalRecover = onDisconnected;
   ws.addEventListener('open', () => {
     trace('websocket.open', { action });
     if (state.ws === ws) debugSend(ws, action);
   });
   const processMessage = orderedMessageHandler(
-    async msg => {
-      if (state.ws !== ws) return;
-      await handleServer(msg);
-      if (msg.type === 'welcome' && state.ws === ws && state.generation) {
-        startSignalKeepalive(ws, onDisconnected);
-      }
-    },
+    msg => state.ws === ws ? handleServer(msg) : undefined,
     err => {
       trace('websocket.message.handler.error', { error: String(err), stack: err?.stack });
       recordSignalError(err.message);
@@ -373,6 +370,7 @@ async function handleServer(msg) {
         generation: state.generation, peers: msg.peers, resumed: restored });
       rememberRoom(); showRoom(true); $('room-name').textContent = msg.code;
       $('room-code-input').value = msg.code;
+      if (state.ws && signalRecover) startSignalKeepalive(state.ws, signalRecover);
       // Resume may restore a server-side name from before the last local edit.
       if (msg.name !== currentDeviceName) {
         state.ws?.send(JSON.stringify({ type: 'rename', name: currentDeviceName }));
@@ -1643,6 +1641,7 @@ $('leave-room').onclick = () => {
   state.leaving = true;
   stopReconnect();
   stopSignalKeepalive();
+  signalRecover = null;
   reconnectAttempts = 0;
   sessionStorage.removeItem('lan-room-session');
   for (const job of state.jobs) if (job.url) URL.revokeObjectURL(job.url);
