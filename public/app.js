@@ -309,7 +309,9 @@ async function handleServer(msg) {
       if (msg.name !== currentDeviceName) {
         state.ws?.send(JSON.stringify({ type: 'rename', name: currentDeviceName }));
       }
-      feedback(restored ? '房间连接已恢复，正在重建 P2P 直连' : '已进入房间，等待设备 P2P 直连');
+      feedback(restored && msg.created === true
+        ? '原房间已关闭，已使用原房间码创建新房间，正在重新建立 P2P 直连'
+        : restored ? '房间连接已恢复，正在重建 P2P 直连' : '已进入房间，等待设备 P2P 直连');
       for (const other of msg.peers) await createPeer(other.id, other.name, true, other.generation);
       renderPeers(); renderRequests(); renderJobs(); renderSentFiles(); break;
     }
