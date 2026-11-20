@@ -233,6 +233,10 @@ test('MULTI-03: dropped B catalog after transient A disconnect is recovered on a
   // catalog request and the sender has already served it once.
   t.receiver.run('requestSharedOffers(state.peers.get("sender"))');
   await flushUntil(()=>t.a.catalogReplayDone === true && t.b.catalogRequested === true);
+  // linkedFilePeers starts with a manually established, mutually verified link.
+  // Record the original ready handshake state that the physical snapshot shows.
+  t.b.localReadySent=true;
+  t.b.readyAt=Date.now();
   const originalPeers=t.receiver.FakeRTCPeerConnection.instances.length;
   const originalOffers=t.receiver.FakeWebSocket.sockets[0].sent.filter(m=>m.signal?.type==='offer').length;
   t.b.pc.connectionState='disconnected';
@@ -279,6 +283,8 @@ test('MULTI-03: a P2P link returning to connected cannot restore file transport 
   const t=await linkedFilePeers();
   t.receiver.run('requestSharedOffers(state.peers.get("sender"))');
   await flushUntil(()=>t.a.catalogReplayDone===true);
+  t.b.localReadySent=true;
+  t.b.readyAt=Date.now();
   const requestsBefore=t.receiver.run('diagnosticsSnapshot().peers[0].transfer.catalogRequestsSent');
   t.b.pc.connectionState='disconnected';
   t.b.pc.onconnectionstatechange();
