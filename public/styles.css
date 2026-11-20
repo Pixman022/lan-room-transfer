@@ -71,7 +71,7 @@ main { min-height: calc(100vh - 76px); }
 .entry-avatar { display: flex; justify-content: center; margin: 2px 0 22px; }
 .entry-room-code label { text-align: center; }
 .entry-panel .room-code-editor { margin-bottom: 16px; }
-.entry-device-chip { display: flex; align-items: center; justify-content: center; gap: 8px; align-self: center; max-width: 100%; min-height: 36px; padding: 2px 6px 2px 12px; margin: 0 auto 24px; border: 1px solid var(--line); border-radius: 999px; background: var(--tint-blue); color: var(--tint-blue-ink); }
+.entry-device-chip { display: flex; align-items: center; justify-content: center; gap: 8px; width: fit-content; max-width: 100%; min-height: 36px; padding: 2px 6px 2px 12px; margin: 0 auto 24px; border: 1px solid var(--line); border-radius: 999px; background: var(--tint-blue); color: var(--tint-blue-ink); }
 .entry-device-caption { flex-shrink: 0; font-size: 11px; color: var(--muted); }
 .entry-device-chip .device-name-line { min-width: 0; }
 .entry-device-chip .device-name-text { font-size: 13px; font-weight: 650; letter-spacing: 0; max-width: min(46vw, 250px); }
