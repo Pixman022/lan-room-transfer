@@ -166,28 +166,53 @@ function sendPeer(peer, control) {
 }
 function deviceName() { return currentDeviceName; }
 function updateDeviceAvatar() {
-  const homeName = $('device-name').value.trim() || deviceName();
-  $('home-device-avatar').textContent = deviceAvatar(homeName);
-  $('home-device-label').textContent = homeName;
+  $('home-device-avatar').textContent = deviceAvatar(deviceName());
+  $('home-device-label').textContent = deviceName();
   $('my-device-avatar').textContent = deviceAvatar(deviceName());
+  $('my-device-label').textContent = deviceName();
 }
-function saveDeviceName(inputId) {
-  const name = $(inputId).value.trim();
+function saveDeviceName(rawName) {
+  const name = String(rawName ?? '').replace(/\s+/g, ' ').trim();
   if (!name || name.length > 40) {
-    feedback('\u8bbe\u5907\u540d\u79f0\u9700\u8981\u4e3a 1\u201340 \u4e2a\u5b57\u7b26', true);
+    feedback('设备名称需要为 1–40 个字符', true);
     return null;
   }
+  const changed = name !== currentDeviceName;
   currentDeviceName = name;
-  $('device-name').value = name;
-  $('room-device-name').value = name;
-  $('my-device-label').textContent = name;
   updateDeviceAvatar();
-  try { window.localStorage.setItem(DEVICE_NAME_KEY, name); }
-  catch { /* Private mode may deny storage. */ }
-  if (state.code && state.ws?.readyState === WebSocket.OPEN) {
-    debugSend(state.ws, { type: 'rename', name });
+  if (changed) {
+    try { window.localStorage.setItem(DEVICE_NAME_KEY, name); }
+    catch { /* Private mode may deny storage. */ }
+    if (state.code && state.ws?.readyState === WebSocket.OPEN) {
+      debugSend(state.ws, { type: 'rename', name });
+    }
   }
   return name;
+}
+function beginDeviceNameEdit(labelId) {
+  const label = $(labelId);
+  if (label.contentEditable === 'plaintext-only') return;
+  label.contentEditable = 'plaintext-only';
+  label.setAttribute('role', 'textbox');
+  label.setAttribute('aria-label', '编辑设备名称，回车保存，Esc 取消');
+  label.focus();
+  const range = document.createRange?.();
+  const selection = window.getSelection?.();
+  if (range && selection) {
+    range.selectNodeContents(label);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+}
+function finishDeviceNameEdit(labelId, cancel = false) {
+  const label = $(labelId);
+  if (label.contentEditable !== 'plaintext-only') return;
+  const nextName = label.textContent;
+  label.contentEditable = 'false';
+  label.removeAttribute('role');
+  label.removeAttribute('aria-label');
+  if (!cancel && saveDeviceName(nextName)) feedback('设备名称已保存');
+  updateDeviceAvatar();
 }
 function rememberRoom() {
   sessionStorage.setItem('lan-room-session', JSON.stringify({
@@ -1812,33 +1837,32 @@ $('qa-start').onclick = qaStartAll;
 $('qa-cancel').onclick = qaCancelPlan;
 if (QA_MODE) qaRender();
 
-$('device-name').value = deviceName();
-$('room-device-name').value = deviceName();
-$('my-device-label').textContent = deviceName();
-$('device-name').addEventListener('input', updateDeviceAvatar);
-$('device-name').addEventListener('change', () => saveDeviceName('device-name'));
 updateDeviceAvatar();
-function toggleNameEditor(visible) {
-  $('name-editor-panel').hidden = !visible;
-  $('edit-device-name').setAttribute('aria-expanded', String(visible));
-  if (visible) {
-    $('room-device-name').value = deviceName();
-    $('room-device-name').focus();
-    $('room-device-name').select();
-  }
+for (const [buttonId, labelId, avatarId] of [
+  ['edit-home-device-name', 'home-device-label', 'home-device-avatar'],
+  ['edit-device-name', 'my-device-label', 'my-device-avatar'],
+]) {
+  const label = $(labelId);
+  $(buttonId).onclick = () => beginDeviceNameEdit(labelId);
+  label.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finishDeviceNameEdit(labelId);
+      label.blur();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finishDeviceNameEdit(labelId, true);
+      label.blur();
+    }
+  });
+  label.addEventListener('beforeinput', event => {
+    if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') event.preventDefault();
+  });
+  label.addEventListener('input', () => {
+    $(avatarId).textContent = deviceAvatar(label.textContent.trim() || deviceName());
+  });
+  label.addEventListener('blur', () => finishDeviceNameEdit(labelId));
 }
-$('edit-device-name').onclick = () => toggleNameEditor($('name-editor-panel').hidden);
-$('cancel-device-name').onclick = () => toggleNameEditor(false);
-$('save-device-name').onclick = () => {
-  if (saveDeviceName('room-device-name')) {
-    toggleNameEditor(false);
-    feedback('设备名称已保存');
-  }
-};
-$('room-device-name').addEventListener('keydown', event => {
-  if (event.key === 'Enter') { event.preventDefault(); $('save-device-name').click(); }
-  if (event.key === 'Escape') toggleNameEditor(false);
-});
 const codeInput = $('room-code-input');
 async function suggestCode() {
   const current = codeInput.value;
@@ -1866,8 +1890,7 @@ codeInput.oninput = event => {
 $('enter-room').onclick = () => {
   try {
     const code = normalizeRoomCode(codeInput.value);
-    const name = saveDeviceName('device-name');
-    if (!name) return;
+    const name = deviceName();
     const action = { type: 'enter', code, name };
     const session = remembered();
     if (session?.code === code) { action.id = session.id; action.token = session.token; }
