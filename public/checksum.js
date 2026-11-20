@@ -1,5 +1,5 @@
 // Browser WebCrypto is available on the HTTPS production origin and localhost.
-// The file size is bounded by the prototype's 32 MiB per-file limit.
+// WebCrypto digests an entire ArrayBuffer at once; large files can exhaust browser memory.
 export async function sha256Hex(blobOrBuffer) {
   const buffer = blobOrBuffer instanceof ArrayBuffer ? blobOrBuffer : await blobOrBuffer.arrayBuffer();
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer));

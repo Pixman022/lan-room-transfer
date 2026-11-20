@@ -4,7 +4,8 @@ import { DEVICE_NAME_KEY, deviceAvatar, generateDeviceName, getOrCreateDeviceNam
 import { generateRandomRoomCode, normalizeRoomCode } from './room-code.js';
 
 // Research prototype only. Browser APIs cannot reliably prove the OS routing path.
-const MAX_FILE_BYTES = 32 * 1024 * 1024;
+// Advisory only: the receiver still buffers complete files in browser memory.
+const LARGE_FILE_WARNING_BYTES = 32 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
 const MAX_FILES = 20;
 const PEER_CONNECT_TIMEOUT_MS = 15000;
@@ -85,7 +86,8 @@ function addButton(parent, text, action, cls = 'secondary small-button') {
   return button;
 }
 const humanSize = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576
-  ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
+  ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1073741824
+    ? `${(bytes / 1048576).toFixed(1)} MB` : `${(bytes / 1073741824).toFixed(2)} GB`;
 function feedback(text, error = false) {
   $('feedback').textContent = text;
   $('feedback').className = error ? 'feedback error' : 'feedback';
@@ -752,7 +754,7 @@ async function receiveChannel(peer, data) {
   } else if (msg.kind === 'file-list') {
     if (typeof msg.offerId !== 'string' || !Array.isArray(msg.files) || msg.files.length > MAX_FILES ||
         msg.files.some(f => typeof f.id !== 'string' || typeof f.name !== 'string' ||
-          f.name.length > 255 || !Number.isSafeInteger(f.size) || f.size < 0 || f.size > MAX_FILE_BYTES)) return;
+          f.name.length > 255 || !Number.isSafeInteger(f.size) || f.size < 0)) return;
     const key = `${peer.id}:${msg.offerId}`;
     if (state.offers.has(key)) return;
     state.offers.set(key, { peerId: peer.id, offerId: msg.offerId,
@@ -1041,7 +1043,9 @@ function syncSharedOffers(peer) {
 function shareFiles(files) {
   if (!state.code) { feedback('请先进入房间', true); return; }
   if (!files.length || files.length > MAX_FILES) { feedback('一次请选择 1–20 个文件', true); return; }
-  if (files.some(file => file.size > MAX_FILE_BYTES)) { feedback('技术原型每个文件最大 32 MB', true); return; }
+  if (files.some(file => !Number.isSafeInteger(file.size) || file.size < 0)) {
+    feedback('文件大小无效', true); return;
+  }
   const offerId = crypto.randomUUID();
   const fileMap = new Map();
   trace('file.share.selection', { files: files.map(file => ({
@@ -1056,7 +1060,9 @@ function shareFiles(files) {
   for (const peer of state.peers.values()) syncSharedOffers(peer);
   renderSentFiles();
   const ready = [...state.peers.values()].filter(peer => peer.ready).length;
-  feedback(ready ? '文件已加入房间共享列表' : '文件已添加，等待设备直连');
+  feedback(files.some(file => file.size > LARGE_FILE_WARNING_BYTES)
+    ? '大文件已加入共享列表；实验性传输可能因浏览器内存不足而失败'
+    : ready ? '文件已加入房间共享列表' : '文件已添加，等待设备直连');
 }
 function withdrawSharedFile(offerId, fileId) {
   const offer = state.ownOffers.find(item => item.offerId === offerId);
