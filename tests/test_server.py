@@ -202,6 +202,20 @@ class SignallingTests(AioHTTPTestCase):
     async def get_application(self):
         return create_app()
 
+    async def test_keepalive_ack_is_signal_only_and_rejects_invalid_messages(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        ws = await self.client.ws_connect("/ws", headers=origin)
+        await ws.send_json({"type": "enter", "code": "IDLER06", "name": "Single A"})
+        welcome = await ws.receive_json(timeout=2)
+        self.assertEqual(welcome["type"], "welcome")
+        await ws.send_json({"type": "keepalive", "seq": 1})
+        self.assertEqual(await ws.receive_json(timeout=2), {"type": "keepalive-ack", "seq": 1})
+        await ws.send_json({"type": "keepalive", "seq": -1})
+        self.assertEqual((await ws.receive_json(timeout=2))["type"], "error")
+        await ws.send_json({"type": "keepalive", "seq": 2, "fileBytes": "must-not-allow"})
+        self.assertEqual((await ws.receive_json(timeout=2))["type"], "error")
+        await ws.close()
+
     async def test_room_members_signal_only_and_disconnect(self):
         origin = {"Origin": str(self.server.make_url("/"))[:-1]}
         a = await self.client.ws_connect("/ws", headers=origin)

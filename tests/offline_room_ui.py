@@ -138,7 +138,7 @@ with sync_playwright() as playwright:
         assert '可供 2 台设备接收' in page.locator('#sent-files .file-row').inner_text()
         page.locator('#toggle-diagnostics').click()
         assert page.locator('#diagnostics-panel').is_visible()
-        assert page.locator('#diagnostics-content .diagnostic-line').count() == 13
+        assert page.locator('#diagnostics-content .diagnostic-line').count() == 14
         assert '设备：3' in page.locator('#diagnostics-panel').inner_text()
         page.locator('#toggle-diagnostics').click()
         assert page.locator('#diagnostics-panel').is_hidden()

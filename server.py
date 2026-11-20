@@ -233,6 +233,16 @@ async def ws_handler(request):
                 await send(ws, {"type": "welcome", "code": room.code, "id": member.id,
                                 "generation": member.generation, "token": member.token,
                                 "name": member.name, "peers": peers, "created": created})
+            elif kind == "keepalive":
+                # Application-level liveness response only. No room metadata,
+                # member credentials or file content is echoed.
+                if not room or not member:
+                    raise ValueError("尚未加入房间")
+                seq = data.get("seq")
+                if (set(data) != {"type", "seq"} or type(seq) is not int or
+                        not 1 <= seq <= 2147483647):
+                    raise ValueError("心跳消息格式无效")
+                await send(ws, {"type": "keepalive-ack", "seq": seq})
             elif kind == "rename":
                 if not room or not member:
                     raise ValueError("尚未加入房间")
