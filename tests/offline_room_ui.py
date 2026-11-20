@@ -27,8 +27,15 @@ with sync_playwright() as playwright:
         page.on('pageerror', lambda exc: errors.append(str(exc)))
         page.set_content(html)
         assert re.fullmatch(r'\d{4}', page.locator('#room-code-input').input_value())
-        assert re.fullmatch(r'[A-Z][a-z]+ [A-Z][a-z]+', page.locator('#device-name').input_value())
-        page.locator('#device-name').fill('Coral Fox')
+        assert page.locator('#device-name').count() == 0
+        assert page.locator('#room-device-name').count() == 0
+        assert re.fullmatch(r'[A-Z][a-z]+ [A-Z][a-z]+', page.locator('#home-device-label').inner_text())
+        page.locator('#edit-home-device-name').click()
+        assert page.locator('#home-device-label').get_attribute('contenteditable') == 'plaintext-only'
+        page.locator('#home-device-label').fill('Coral Fox')
+        page.locator('#home-device-label').press('Enter')
+        assert page.locator('#home-device-label').inner_text() == 'Coral Fox'
+        assert page.locator('#home-device-label').get_attribute('contenteditable') == 'false'
         assert page.locator('#home-device-avatar').inner_text() == '🦊'
         page.locator('#room-code-input').fill('HOME2026')
         page.screenshot(path=str(ROOT / 'docs' / f'{label}-static.png'), full_page=True)
@@ -143,11 +150,16 @@ with sync_playwright() as playwright:
         page.locator('#toggle-diagnostics').click()
         assert page.locator('#diagnostics-panel').is_hidden()
         assert page.locator('#peer-list .device-icon').first.inner_text() == '🐻'
-        assert page.locator('#name-editor-panel').is_hidden()
         page.locator('#edit-device-name').click()
-        page.locator('#room-device-name').fill('Peach Panda')
-        page.locator('#save-device-name').click()
+        assert page.locator('#my-device-label').get_attribute('contenteditable') == 'plaintext-only'
+        page.locator('#my-device-label').fill('Not saved')
+        page.locator('#my-device-label').press('Escape')
+        assert page.locator('#my-device-label').inner_text() == 'Coral Fox'
+        page.locator('#edit-device-name').click()
+        page.locator('#my-device-label').fill('Peach Panda')
+        page.locator('#my-device-label').press('Enter')
         assert page.locator('#my-device-label').inner_text() == 'Peach Panda'
+        assert page.locator('#home-device-label').inner_text() == 'Peach Panda'
         assert page.locator('#my-device-avatar').inner_text() == '🐼'
 
         # New uploads are announced to *all* connected devices, without a recipient selector.
