@@ -25,7 +25,7 @@ function harness({debug = false, realRoutePolicy = false, realChecksum = false, 
         textContent: '', value: '', className: '', dataset: {}, style: {},
         classList: { add() {}, remove() {} },
         append() {}, replaceChildren() {}, addEventListener() {},
-        setAttribute() {}, focus() {}, select() {},
+        setAttribute() {}, removeAttribute() {}, focus() {}, blur() {}, select() {},
       });
     }
     return elements.get(id);
@@ -2049,4 +2049,49 @@ test('R06 active idle socket replies to keepalive and manual Leave stops watchdo
   t.run('document.getElementById("leave-room").onclick()');
   assert.equal(t.intervals.size,0);
   assert.equal(t.timers.size,0);
+});
+
+
+test('device name is edited inline in home and room without standalone name inputs', async () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(html, /id="device-name"|id="room-device-name"|id="name-editor-panel"/);
+  assert.match(html, /id="edit-home-device-name"/);
+  assert.match(html, /id="edit-device-name"/);
+  const t = harness();
+  const home = t.elements.get('home-device-label');
+  const room = t.elements.get('my-device-label');
+  assert.equal(home.textContent, 'Amber Fox');
+  assert.equal(room.textContent, 'Amber Fox');
+
+  t.run('beginDeviceNameEdit("home-device-label")');
+  assert.equal(home.contentEditable, 'plaintext-only');
+  home.textContent = 'Coral Fox';
+  t.run('finishDeviceNameEdit("home-device-label")');
+  assert.equal(home.contentEditable, 'false');
+  assert.equal(t.run('deviceName()'), 'Coral Fox');
+  assert.equal(room.textContent, 'Coral Fox');
+  assert.equal(t.run('window.localStorage.getItem(DEVICE_NAME_KEY)'), 'Coral Fox');
+
+  t.run('connect({type:"enter",code:"5832",name:deviceName()})');
+  await join(t, t.FakeWebSocket.sockets[0]);
+  t.run('beginDeviceNameEdit("my-device-label")');
+  room.textContent = 'Peach Panda';
+  t.run('finishDeviceNameEdit("my-device-label")');
+  assert.equal(home.textContent, 'Peach Panda');
+  assert.equal(room.textContent, 'Peach Panda');
+  assert.equal(t.FakeWebSocket.sockets[0].sent.at(-1).type, 'rename');
+  assert.equal(t.FakeWebSocket.sockets[0].sent.at(-1).name, 'Peach Panda');
+
+  const sentCount = t.FakeWebSocket.sockets[0].sent.length;
+  t.run('beginDeviceNameEdit("my-device-label")');
+  room.textContent = 'Not saved';
+  t.run('finishDeviceNameEdit("my-device-label", true)');
+  assert.equal(room.textContent, 'Peach Panda', 'Escape restores the name');
+  assert.equal(t.FakeWebSocket.sockets[0].sent.length, sentCount, 'Escape does not emit rename');
+
+  t.run('beginDeviceNameEdit("my-device-label")');
+  room.textContent = '   ';
+  t.run('finishDeviceNameEdit("my-device-label")');
+  assert.equal(room.textContent, 'Peach Panda', 'invalid empty name reverts');
+  assert.equal(t.FakeWebSocket.sockets[0].sent.length, sentCount, 'invalid name not signaled');
 });
