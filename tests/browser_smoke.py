@@ -104,8 +104,8 @@ with sync_playwright() as playwright:
     # online, and B must automatically resume its *existing* room identity.
     # This same-machine test cannot assert B/C P2P path or file-byte recovery.
     b.locator('#toggle-diagnostics').click()
-    assert len(b.evaluate('window.__smokeWebSockets')) == 1
-    b.evaluate('window.__smokeWebSockets[0].close(1012, "test interruption")')
+    assert b.evaluate('window.__smokeWebSockets.length') == 1
+    b.evaluate('window.__smokeWebSockets[0].close(4000, "test interruption")')
     b.wait_for_function("""() =>
         window.__smokeWebSockets.length >= 2 &&
         window.__smokeWebSockets.at(-1).readyState === WebSocket.OPEN &&
@@ -124,8 +124,8 @@ with sync_playwright() as playwright:
     # automatically creates a fresh room with the old code and retains its
     # locally staged File object, without refreshing or clicking Enter.
     a.locator('#toggle-diagnostics').click()
-    assert len(a.evaluate('window.__smokeWebSockets')) == 1
-    a.evaluate('window.__smokeWebSockets[0].close(1012, "test interruption")')
+    assert a.evaluate('window.__smokeWebSockets.length') == 1
+    a.evaluate('window.__smokeWebSockets[0].close(4000, "test interruption")')
     a.wait_for_function("""() =>
         window.__smokeWebSockets.length >= 2 &&
         window.__smokeWebSockets.at(-1).readyState === WebSocket.OPEN &&
