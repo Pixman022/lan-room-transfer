@@ -1,5 +1,28 @@
 # POC field test matrix
 
+## Current acceptance gate (2026-11-23)
+
+This section is the **current status**; the dated sections below preserve historical
+diagnostics and do not override these gates. Verified production baseline at
+this audit's start: `6399e4d` (Render **Live**, deployed automatically from `main`; [auto-deploy
+incident #47](https://github.com/Pixman022/lan-room-transfer/issues/47) closed).
+
+| Acceptance | Verified evidence | Next missing evidence |
+| --- | --- | --- |
+| MULTI-03 / HASH-01 ([#21](https://github.com/Pixman022/lan-room-transfer/issues/21)) | Three real devices received A→B, A→C, B→A concurrently at the app level; in-app hashes passed; C independently demonstrated sequential Receive All and manual Save of 5 MiB / 64 KiB / 0 B | **Externally hash the actual saved files** from C and from the same successful synchronized run. A previously verified B 5 MiB file was saved in a *different* retry run |
+| QA synchronized trigger ([#26](https://github.com/Pixman022/lan-room-transfer/issues/26)) | One physical A/B/C run had ~1,102 ms estimated receive-window overlap | Strict checklist also requires independently hashed saved files; do not close from app hashes alone |
+| R05 ([#17](https://github.com/Pixman022/lan-room-transfer/issues/17)) | App-ready B↔A and B↔C achieved in one real device run; implementation/automated signalling recoveries exist | B's **automatic** reconnect while A and C remain, observed `roomEntry:resumed` when identity survives, **actual B↔C file after reconnect** and B+C redacted diagnostics if stuck |
+| R06 ([#19](https://github.com/Pixman022/lan-room-transfer/issues/19)) | Physical isolated A power-off followed by B same-code `created` passed; keepalive and staged File retention have automated tests | One **surviving foreground browser tab** auto-recreates a room after server-detected last-member teardown with its staged File preserved |
+| Network/security and browsers | Route checks, signalling and mock/browser suites passed | Separate-Wi-Fi/VPN/guest isolation and Android Chrome/iOS Safari real-device verification |
+| ICE reliability ([#6](https://github.com/Pixman022/lan-room-transfer/issues/6)) | Five-run Chrome/Firefox baseline 4/5 auto-ready | **Deferred by user**; do not change existing 2+2 attempt policy |
+
+A new same-host Chromium/WebSocket smoke check exercises R05 identity resume and
+R06 same-tab fresh-room recreation against the real local signalling server
+by **intentionally closing browser WebSockets**. This is a *control-plane*
+regression only; it does not prove actual network-loss detection, multi-device
+P2P readiness, transfer bytes or any of the missing physical acceptance above.
+
+
 Status (2026-11-18; updated 2026-11-19): **User reports successful bidirectional file transfer between real devices after restricted P2P mode was deployed.** This confirms the basic send/receive path was exercised by the user, beyond the previous room-entry-only result. File sizes, saved-file SHA-256 comparisons, repeated-run reliability, device/browser versions, and cross-network security have **not** been independently verified. Earlier "未通过/未测试" responses were ambiguous and are superseded only for the basic transfer scenario.
 
 **Connection stability follow-up (2026-11-18):** User reported that establishing a peer connection sometimes takes unusually long and behaves inconsistently. This is an observation, not yet a measured failure rate. Code fixes now serialize incoming SDP/ICE operations, send local SDP before buffered candidates, forward ICE end-of-candidates, and show an explicit status after 12 seconds while permitting late recovery. Do not equate this to verified performance improvement until separate devices repeat the test. For each retry, record `stage`, `elapsedSeconds`, `candidatesSent`, `candidatesReceived`, `ice`, `channel`, and `reason` from the privacy-reduced diagnostics on both devices. Browser automation here could only test mocked peer sequencing, not a genuine routed LAN path.
