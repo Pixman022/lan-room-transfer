@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from collections import deque
 from unittest.mock import patch
 
+from aiohttp import WSServerHandshakeError, WSMsgType
 from aiohttp.test_utils import AioHTTPTestCase
 
 from server import RoomRegistry, SUGGEST_RATE_LIMIT, client_rate_key, create_app, prune_rate_counters, send
@@ -45,12 +46,12 @@ class RateClientIpTests(unittest.TestCase):
 class RateCounterTests(unittest.TestCase):
     def test_expired_clients_are_reclaimed_and_active_windows_stay(self):
         app = create_app()
-        for kind in ("rate", "join_rate", "suggest_rate"):
+        for kind in ("rate", "join_rate", "suggest_rate", "ws_upgrade_rate"):
             app[kind]["stale"] = deque([1.0])
             app[kind]["active"] = deque([150.0])
             app[kind]["mixed"] = deque([1.0, 150.0])
         prune_rate_counters(app, 160.0)
-        for kind in ("rate", "join_rate", "suggest_rate"):
+        for kind in ("rate", "join_rate", "suggest_rate", "ws_upgrade_rate"):
             self.assertNotIn("stale", app[kind])
             self.assertEqual(list(app[kind]["active"]), [150.0])
             self.assertEqual(list(app[kind]["mixed"]), [150.0])
@@ -179,6 +180,50 @@ class RoomUnitTests(unittest.TestCase):
             with self.subTest(code=code), self.assertRaises(ValueError):
                 rooms.validate_code(code)
 
+
+
+class WebSocketAdmissionTests(AioHTTPTestCase):
+    async def get_application(self):
+        return create_app()
+
+    async def test_unjoined_socket_expires_but_joined_socket_stays_open(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        with patch("server.WS_ENTRY_TIMEOUT_SECONDS", 0.05):
+            idle = await self.client.ws_connect("/ws", headers=origin)
+        expired = await idle.receive(timeout=2)
+        self.assertIn(expired.type, (WSMsgType.CLOSE, WSMsgType.CLOSED))
+        self.assertEqual(idle.close_code, 1008)
+        await idle.close()
+
+        with patch("server.WS_ENTRY_TIMEOUT_SECONDS", 0.05):
+            joined = await self.client.ws_connect("/ws", headers=origin)
+        await joined.send_json({"type": "enter", "code": "UPGRADE26", "name": "Device"})
+        self.assertEqual((await joined.receive_json(timeout=2))["type"], "welcome")
+        await asyncio.sleep(0.10)
+        self.assertFalse(joined.closed, "room entry must cancel the handshake deadline")
+        await joined.send_json({"type": "keepalive", "seq": 1})
+        self.assertEqual(await joined.receive_json(timeout=2), {"type": "keepalive-ack", "seq": 1})
+        await joined.close()
+
+    async def test_upgrade_rate_is_bounded_before_socket_allocation(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        with patch("server.WS_UPGRADE_RATE_LIMIT", 2):
+            a = await self.client.ws_connect("/ws", headers=origin)
+            b = await self.client.ws_connect("/ws", headers=origin)
+            with self.assertRaises(WSServerHandshakeError) as raised:
+                await self.client.ws_connect("/ws", headers=origin)
+            self.assertEqual(raised.exception.status, 429)
+            self.assertEqual(len(self.app["ws_upgrade_rate"]), 1)
+            self.assertEqual(len(next(iter(self.app["ws_upgrade_rate"].values()))), 2)
+            self.assertEqual((await self.client.get("/health")).status, 200)
+            await a.close()
+            await b.close()
+            # Existing connections can close normally; old attempts roll off.
+            key = next(iter(self.app["ws_upgrade_rate"]))
+            self.app["ws_upgrade_rate"][key] = deque([time.monotonic() - 61])
+            next_socket = await self.client.ws_connect("/ws", headers=origin)
+            self.assertEqual(len(self.app["ws_upgrade_rate"][key]), 1)
+            await next_socket.close()
 
 
 class RoomLifecycleIntegrationTests(AioHTTPTestCase):

@@ -23,6 +23,8 @@ CODE_RE = re.compile(r"^[A-Z0-9]{4,16}$")
 MAX_ONLINE_MEMBERS = 10
 MAX_MESSAGE_BYTES = 65536
 SUGGEST_RATE_LIMIT = 60  # per client IP per rolling minute; not an anti-guessing control
+WS_UPGRADE_RATE_LIMIT = 60  # per client IP per minute, before WebSocket upgrade
+WS_ENTRY_TIMEOUT_SECONDS = 20  # close idle sockets that never enter a room
 
 
 def client_rate_key(request):
@@ -168,7 +170,7 @@ async def announce(room, payload, except_id=None):
 
 def prune_rate_counters(app, now):
     """Do not retain inactive per-IP request counters indefinitely."""
-    for rates in (app["rate"], app["join_rate"], app["suggest_rate"]):
+    for rates in (app["rate"], app["join_rate"], app["suggest_rate"], app["ws_upgrade_rate"]):
         for ip, attempts in list(rates.items()):
             while attempts and now - attempts[0] > 60:
                 attempts.popleft()
@@ -204,9 +206,23 @@ async def ws_handler(request):
         raise web.HTTPForbidden(text="WebSocket origin rejected")
     # These are operational limits, not a complete public-service abuse defence.
     ip = client_rate_key(request)
+    # Reject handshake floods before allocating a long-lived WebSocket.
+    upgrades = request.app["ws_upgrade_rate"][ip]
+    now = time.monotonic()
+    while upgrades and now - upgrades[0] > 60:
+        upgrades.popleft()
+    if len(upgrades) >= WS_UPGRADE_RATE_LIMIT:
+        raise web.HTTPTooManyRequests(
+            text="连接请求过于频繁，请稍后重试", headers={"Retry-After": "60"})
+    upgrades.append(now)
     registry = request.app["registry"]
     ws = web.WebSocketResponse(max_msg_size=MAX_MESSAGE_BYTES, heartbeat=25)
     await ws.prepare(request)
+    # An upgraded socket without a successful room entry has no useful work.
+    # Close it after a short deadline even if the client keeps it idle.
+    entry_timeout = asyncio.get_running_loop().call_later(
+        WS_ENTRY_TIMEOUT_SECONDS,
+        lambda: asyncio.create_task(ws.close(code=1008, message=b"Room entry timeout")))
     room = None
     member = None
 
@@ -252,6 +268,7 @@ async def ws_handler(request):
                 new_room, new_member, created = registry.enter(
                     code, data.get("name"), ws, data.get("id"), data.get("token"))
                 room, member = new_room, new_member
+                entry_timeout.cancel()
                 resumed = prior is member
                 if resumed:
                     # Reset old RTC peer objects before the new socket begins
@@ -348,6 +365,7 @@ async def ws_handler(request):
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             await send(ws, {"type": "error", "message": str(exc)})
 
+    entry_timeout.cancel()
     if room and member and member.ws is ws:
         # An old socket replaced during resume must not announce that the
         # newly resumed incarnation is offline.
@@ -406,6 +424,7 @@ def create_app(registry=None, origin=None, trust_render_proxy=False):
     app["rate"] = defaultdict(deque)
     app["join_rate"] = defaultdict(deque)
     app["suggest_rate"] = defaultdict(deque)
+    app["ws_upgrade_rate"] = defaultdict(deque)
     app.router.add_get("/", home)
     app.router.add_get("/static/{filename}", assets)
     app.router.add_get("/api/suggest-code", suggest_code)
