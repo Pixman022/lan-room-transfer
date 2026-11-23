@@ -420,6 +420,41 @@ class SignallingTests(AioHTTPTestCase):
         await a.close()
         await b.close()
 
+    async def test_cross_type_signal_fields_are_rejected_without_relay(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        a = await self.client.ws_connect("/ws", headers=origin)
+        await a.send_json({"type": "enter", "code": "STRICTSIGNAL", "name": "A"})
+        a_welcome = await a.receive_json()
+        b = await self.client.ws_connect("/ws", headers=origin)
+        await b.send_json({"type": "enter", "code": "STRICTSIGNAL", "name": "B"})
+        b_welcome = await b.receive_json()
+        await a.receive_json()  # peer-online
+
+        invalid = (
+            {"type": "offer", "attempt": 1, "sdp": "v=0", "candidate": {"candidate": ""}},
+            {"type": "answer", "attempt": 1, "sdp": "v=0", "candidate": "extra payload"},
+            {"type": "candidate", "attempt": 1, "candidate": {"candidate": ""}, "sdp": "extra payload"},
+        )
+        for payload in invalid:
+            with self.subTest(kind=payload["type"]):
+                await a.send_json({"type": "signal", "to": b_welcome["id"],
+                                   "toGeneration": b_welcome["generation"], "signal": payload})
+                error = await a.receive_json(timeout=2)
+                self.assertEqual(error["type"], "error")
+                self.assertIn("多余字段", error["message"])
+
+        # If any forbidden payload was relayed, it would appear before this
+        # valid offer in B's WebSocket queue.
+        valid = {"type": "offer", "attempt": 1, "sdp": "v=0"}
+        await a.send_json({"type": "signal", "to": b_welcome["id"],
+                           "toGeneration": b_welcome["generation"], "signal": valid})
+        forwarded = await b.receive_json(timeout=2)
+        self.assertEqual(forwarded["type"], "signal")
+        self.assertEqual(forwarded["from"], a_welcome["id"])
+        self.assertEqual(forwarded["signal"], valid)
+        await a.close()
+        await b.close()
+
     async def test_stalled_ice_retry_signalling_and_attempt_rejection(self):
         origin = {"Origin": str(self.server.make_url("/"))[:-1]}
         a = await self.client.ws_connect("/ws", headers=origin)
