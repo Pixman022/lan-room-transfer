@@ -2319,3 +2319,19 @@ test('successful diagnostics copy uses the same toast without exposing report co
   assert.equal(t.elements.get('toast').hidden, false);
   assert.equal(t.timers.get(t.run('toastTimer')).ms, 2400);
 });
+
+
+test('pairing hides duplicate non-error status while keeping error and room feedback', () => {
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.match(css, /#home-screen:not\(\[hidden\]\)\s*~\s*#feedback:not\(\.error\)\s*\{\s*display:\s*none;/);
+  assert.match(html, /id="enter-room"[^>]*aria-busy/);
+  assert.match(html, /id="entry-button-label">进入房间/);
+  assert.match(html, /id="feedback"[^>]*role="status"/);
+  assert.match(html, /class="prototype-note"/);
+  const t = harness();
+  t.run("feedback('正在连接房间…')");
+  assert.equal(t.elements.get('feedback').className, 'feedback');
+  t.run("feedback('无法连接房间，请重试', true)");
+  assert.equal(t.elements.get('feedback').className, 'feedback error');
+});
