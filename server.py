@@ -286,10 +286,18 @@ async def ws_handler(request):
                     await send(ws, {"type": "peer-unavailable", "id": data.get("to"),
                                     "generation": target_generation})
                     continue
-                if (not isinstance(signal, dict) or signal.get("type") not in
-                        ("offer", "answer", "candidate", "retry") or
-                        set(signal) - {"type", "sdp", "candidate", "attempt"}):
+                if not isinstance(signal, dict) or signal.get("type") not in (
+                        "offer", "answer", "candidate", "retry"):
                     raise ValueError("不允许的信令消息类型")
+                # No SDP/candidate cross-type fields can be relayed as opaque
+                # extras. Keep the existing ICE rounds and payload schema.
+                allowed = {"type", "attempt"}
+                if signal["type"] in ("offer", "answer"):
+                    allowed.add("sdp")
+                elif signal["type"] == "candidate":
+                    allowed.add("candidate")
+                if set(signal) - allowed:
+                    raise ValueError("信令消息包含多余字段")
                 attempt = signal.get("attempt")
                 if attempt is not None and (type(attempt) is not int or not 0 <= attempt <= 4):
                     raise ValueError("ICE 协商轮次无效")
