@@ -23,8 +23,8 @@ CODE_RE = re.compile(r"^[A-Z0-9]{4,16}$")
 # The ICE candidate type is the token after the address and port, not
 # any later appearance of "typ host" in attacker-controlled extensions.
 HOST_CANDIDATE_RE = re.compile(
-    r"\\Acandidate:\\S+[ \\t]+\\d+[ \\t]+\\S+[ \\t]+\\d+[ \\t]+\\S+[ \\t]+\\d+"
-    r"[ \\t]+typ[ \\t]+host(?=[ \\t]|\\Z)"
+    r"\Acandidate:\S+[ \t]+\d+[ \t]+\S+[ \t]+\d+[ \t]+\S+[ \t]+\d+"
+    r"[ \t]+typ[ \t]+host(?=[ \t]|\Z)"
 )
 MAX_ONLINE_MEMBERS = 10
 MAX_MESSAGE_BYTES = 65536
