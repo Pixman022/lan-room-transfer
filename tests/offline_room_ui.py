@@ -211,6 +211,8 @@ with sync_playwright() as playwright:
                                              ['peer-2','Silver Otter',true],
                                              ['peer-3','Sky Owl',false]]) {
                 const peer = {id, name, ready, reason:'等待局域网连接',
+                    attempt:1, stage:'mock-ready', attemptHistory:[], startedAt:Date.now(),
+                    readyAt:ready ? Date.now() : null,
                     sending:new Map(), syncedOffers:new Set(), pc:{close(){}},
                     channel:{readyState:'open', send: data =>
                         window.__messages.push({id, packet:JSON.parse(data)})}};
@@ -275,6 +277,7 @@ with sync_playwright() as playwright:
             const d = window.__demo;
             const id = 'peer-4';
             const peer = {id, name:'Violet Wolf', ready:true, syncedOffers:new Set(),
+                attempt:1, stage:'mock-ready', attemptHistory:[], startedAt:Date.now(), readyAt:Date.now(),
                 sending:new Map(), pc:{close(){}}, channel:{readyState:'open', send: data =>
                 window.__messages.push({id, packet:JSON.parse(data)})}};
             d.state.peers.set(id, peer); d.syncSharedOffers(peer); d.renderPeers();
