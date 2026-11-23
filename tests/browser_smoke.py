@@ -31,6 +31,19 @@ with sync_playwright() as playwright:
     browser = playwright.chromium.launch(**options)
     one = browser.new_context(viewport={'width': 1280, 'height': 900})
     two = browser.new_context(viewport={'width': 390, 'height': 844})
+    # Observe the real sockets so the smoke test can cause an unexpected
+    # signalling-only close without mutating production application code.
+    for context in (one, two):
+        context.add_init_script("""() => {
+            const NativeWebSocket = window.WebSocket;
+            window.__smokeWebSockets = [];
+            window.WebSocket = class TrackedWebSocket extends NativeWebSocket {
+                constructor(...args) {
+                    super(...args);
+                    window.__smokeWebSockets.push(this);
+                }
+            };
+        }""".replace("() => {", "(() => {").replace("\n        }", "\n        })()"))
     a, b = one.new_page(), two.new_page()
     errors = []
     for page in (a, b):
@@ -87,11 +100,45 @@ with sync_playwright() as playwright:
         page.screenshot(path=str(SCREENSHOT_DIR / (name + '-ui.png')), full_page=True)
     assert not errors, errors
 
+    # R05 control-plane variant: B's socket closes unexpectedly, A stays
+    # online, and B must automatically resume its *existing* room identity.
+    # This same-machine test cannot assert B/C P2P path or file-byte recovery.
+    b.locator('#toggle-diagnostics').click()
+    assert len(b.evaluate('window.__smokeWebSockets')) == 1
+    b.evaluate('window.__smokeWebSockets[0].close(1012, "test interruption")')
+    b.wait_for_function("""() =>
+        window.__smokeWebSockets.length >= 2 &&
+        window.__smokeWebSockets.at(-1).readyState === WebSocket.OPEN &&
+        document.getElementById('diagnostics-content').textContent.includes('房间进入：resumed')
+    """, timeout=15000)
+    b.locator('#peer-list').get_by_text('Updated Laptop').wait_for()
+    assert b.locator('#room-name').inner_text() == 'HOME2026'
+    b.locator('#toggle-diagnostics').click()
+
     b.locator('#leave-room').click()
     b.locator('#home-screen').wait_for(state='visible')
     a.locator('#peer-list .device-row').wait_for(state='hidden')
+
+    # R06 control-plane variant: A is the last online device. On unexpected
+    # socket close the server releases the room; the *same open browser tab*
+    # automatically creates a fresh room with the old code and retains its
+    # locally staged File object, without refreshing or clicking Enter.
+    a.locator('#toggle-diagnostics').click()
+    assert len(a.evaluate('window.__smokeWebSockets')) == 1
+    a.evaluate('window.__smokeWebSockets[0].close(1012, "test interruption")')
+    a.wait_for_function("""() =>
+        window.__smokeWebSockets.length >= 2 &&
+        window.__smokeWebSockets.at(-1).readyState === WebSocket.OPEN &&
+        document.getElementById('feedback').textContent.includes('原房间已关闭')
+    """, timeout=15000)
+    assert '房间进入：created' in a.locator('#diagnostics-content').inner_text()
+    assert a.locator('#room-name').inner_text() == 'HOME2026'
+    assert a.locator('#sent-files .file-row').count() == 1
+    assert 'smoke.txt' in a.locator('#sent-files').inner_text()
+    a.locator('#toggle-diagnostics').click()
+    assert not errors, errors
     a.locator('#leave-room').click()
     a.locator('#home-screen').wait_for(state='visible')
     browser.close()
-    print('PASS: real local HTTP/WebSocket join, presence, inline rename, file staging, desktop/mobile UI')
-    print('LIMIT: same-host browsers; no physical LAN route or file byte delivery accepted here')
+    print('PASS: local HTTP/WebSocket join, rename, file staging, R05 session resume, R06 fresh room with staged File')
+    print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
