@@ -189,7 +189,10 @@ with sync_playwright() as playwright:
             });
             return absent && !d.state.peers.has('stale-peer');
         }''')
-        assert page.locator('#connection-status').inner_text() == '房间已连接'
+        # A visual-only room mock has no actual WebSocket session; it must
+        # not claim that the live room is connected.
+        assert page.locator('#connection-status').inner_text() == '正在恢复连接'
+        assert page.locator('#connection-status').get_attribute('data-state') == 'waiting'
         assert page.locator('#toggle-diagnostics').count() == 1
         # A file can be shared before another device arrives.
         with page.expect_file_chooser() as chooser:
