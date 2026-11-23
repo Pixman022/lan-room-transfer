@@ -16,3 +16,55 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -s tests -q
       - run: node --test tests/*.test.mjs
+
+  browser-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install UI harness and Chromium
+        run: |
+          pip install -r requirements.txt 'playwright>=1.55,<2'
+          python -m playwright install --with-deps chromium
+      - name: Run desktop/mobile offline UI regression (mock P2P)
+        run: python tests/offline_room_ui.py
+      - name: Start local HTTP and WebSocket server
+        run: |
+          python server.py > "$RUNNER_TEMP/lan-room-server.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/lan-room-server.pid"
+          python - <<'PY'
+          import time
+          from urllib.request import urlopen
+          for _ in range(40):
+              try:
+                  with urlopen('http://127.0.0.1:8765/health', timeout=1) as response:
+                      assert response.status == 200
+                  break
+              except Exception:
+                  time.sleep(0.3)
+          else:
+              raise SystemExit('local test server did not become healthy')
+          PY
+      - name: Real Chromium signalling/UI smoke (same host, no LAN proof)
+        run: python tests/browser_smoke.py
+      - name: Upload harmless test screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-ui-test-screenshots
+          path: |
+            docs/*-static.png
+            docs/*-ui.png
+          if-no-files-found: ignore
+      - name: Show server output if browser test fails
+        if: failure()
+        run: if [ -f "$RUNNER_TEMP/lan-room-server.log" ]; then cat "$RUNNER_TEMP/lan-room-server.log"; fi
+      - name: Stop local server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/lan-room-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/lan-room-server.pid")" || true
+          fi
