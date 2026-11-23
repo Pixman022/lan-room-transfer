@@ -232,7 +232,10 @@ with sync_playwright() as playwright:
         }''')
         assert page.locator('#peer-list .device-row').count() == 3
         assert page.locator('#peer-list button').count() == 0
-        assert page.locator('#connection-status').inner_text() == '文件直连就绪'
+        # Fake ready peers do not override the intentionally missing WebSocket:
+        # a room cannot claim full connectivity with signalling disconnected.
+        assert page.locator('#connection-status').inner_text() == '正在恢复连接'
+        assert page.locator('#connection-status').get_attribute('data-state') == 'waiting'
         assert '可供 2 台设备接收' in page.locator('#sent-files .file-row').inner_text()
         page.locator('#toggle-diagnostics').click()
         assert page.locator('#diagnostics-panel').is_visible()
