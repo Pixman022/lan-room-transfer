@@ -69,6 +69,43 @@ To test **real concurrent file bytes with one human operating A/B/C**, open the 
 
 **Safety:** The QA receiver must be locally armed; the coordinator cannot choose or read files from remote devices. The test trigger itself carries only `kind` and a fixed countdown, no filenames, file bytes, credentials, or addresses. The normal per-receiver queue, SHA-256 and current selected-path safety checks remain in force. The fixed 32 MiB cap is removed for experiments, but whole-file buffering can fail on mobile; 64/32/128 MiB must not be advertised as proven size support.
 
+## Independently verify files saved in the browser (HASH-01)
+
+For [three-device Issue #21](https://github.com/Pixman022/lan-room-transfer/issues/21),
+use the **actual saved downloads** from the *same* successful synchronized
+A/B/C run. Do not substitute a sender's original file, an in-app "checksum
+passed" message, or a saved file from an earlier retry. C's already-confirmed
+Receive All and 0-byte Save need not be repeated if those downloads remain
+available.
+
+Copy mobile downloads to a Windows PC over USB if needed. Download the
+repository's `tools/verify-field-hashes.ps1` locally, then run in PowerShell
+with the correct paths to the five saved files (only include paths you have):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-field-hashes.ps1 `
+  -RunLabel "synchronized-round-2026-11-20" `
+  -AFromB  "D:\LANRoom\Round1\A\B_reply_1MiB.bin" `
+  -BFromA  "D:\LANRoom\Round1\B\A_main_5MiB(1).bin" `
+  -C5MiB   "D:\LANRoom\Round1\C\A_main_5MiB.bin" `
+  -C64KiB  "D:\LANRoom\Round1\C\A_extra_64KiB.bin" `
+  -C0B     "D:\LANRoom\Round1\C\A_empty_0B.bin"
+```
+
+The user must manually confirm that the files belong to the **same run**;
+the optional run label is not verified by the script. The checker uses
+`Get-FileHash -Algorithm SHA256`, checks each fixture's exact byte count, and
+does **not** connect to the internet. It accepts arbitrary saved filenames
+(including `(1)` suffixes) because the file's role is supplied explicitly;
+it **never** automatically picks a potentially older matching download.
+Only the fixture role and checksum results are printed, not local file paths.
+Exit codes: `0` = all five saved files supplied and matching, `1` = at
+least one provided file failed or was unreadable, `2` = only a subset was
+provided (so overall acceptance is **PARTIAL**, even when the provided C files
+pass). Keep Issue #21 open until the actual-device same-run receipts have
+been independently checked and recorded. Avoid uploading private downloads
+or diagnostic reports to public hash sites.
+
 ## Run automated tests
 
 ```bash
