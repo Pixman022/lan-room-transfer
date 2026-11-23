@@ -75,6 +75,16 @@ with sync_playwright() as playwright:
         assert page.locator('#enter-room').is_enabled()
         assert page.locator('#entry-loading-icon').is_hidden()
         assert page.locator('#entry-button-label').inner_text() == '进入房间'
+        # Pairing status is already on the join button. Never repeat it above
+        # the existing transfer limitations; retain real errors.
+        page.evaluate("feedback('正在连接房间…')")
+        assert page.locator('#feedback').is_hidden()
+        assert page.locator('.prototype-note').is_visible()
+        page.evaluate("feedback('无法连接房间，请重试', true)")
+        assert page.locator('#feedback').is_visible()
+        assert '无法连接房间' in page.locator('#feedback').inner_text()
+        page.evaluate("feedback('')")
+        assert page.locator('#feedback').is_hidden()
         # Header status uses distinct offline/waiting/ready color dots.
         status_colors = page.evaluate('''() => {
             const status = document.getElementById('connection-status');
@@ -100,6 +110,10 @@ with sync_playwright() as playwright:
             document.getElementById('my-device-label').textContent = 'Coral Fox';
             d.renderPeers();
         }''')
+        # Room feedback must remain visible when the room screen is active.
+        page.evaluate("feedback('房间已连接')")
+        assert page.locator('#feedback').is_visible()
+        assert page.locator('#feedback').inner_text() == '房间已连接'
         # The room title owns its copy icon; no redundant online badge or toolbar copy action.
         assert page.locator('.room-title-line #copy-code').count() == 1
         assert page.locator('#copy-code').get_attribute('aria-label') == '复制房间号'
