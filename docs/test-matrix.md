@@ -3,8 +3,8 @@
 ## Current acceptance gate (2026-11-23)
 
 This section is the **current status**; the dated sections below preserve historical
-diagnostics and do not override these gates. Latest verified production revision:
-`6399e4d` (Render **Live**, deployed automatically from `main`; [auto-deploy
+diagnostics and do not override these gates. Verified production baseline at
+this audit's start: `6399e4d` (Render **Live**, deployed automatically from `main`; [auto-deploy
 incident #47](https://github.com/Pixman022/lan-room-transfer/issues/47) closed).
 
 | Acceptance | Verified evidence | Next missing evidence |
