@@ -6,6 +6,7 @@ File metadata and bytes travel only on the WebRTC data channel.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -21,7 +22,21 @@ ROOT = Path(__file__).resolve().parent
 CODE_RE = re.compile(r"^[A-Z0-9]{4,16}$")
 MAX_ONLINE_MEMBERS = 10
 MAX_MESSAGE_BYTES = 65536
-SUGGEST_RATE_LIMIT = 60  # per source IP per rolling minute; not an anti-guessing control
+SUGGEST_RATE_LIMIT = 60  # per client IP per rolling minute; not an anti-guessing control
+
+
+def client_rate_key(request):
+    # Render's trusted Cloudflare ingress overwrites CF-Connecting-IP.
+    # Do not trust X-Forwarded-For, whose caller-provided entries are spoofable.
+    # Local/direct servers must ignore all proxy headers.
+    if request.app["trust_render_proxy"]:
+        candidate = request.headers.get("CF-Connecting-IP", "").strip()
+        if candidate:
+            try:
+                return str(ipaddress.ip_address(candidate))
+            except ValueError:
+                pass
+    return request.remote or "unknown"
 
 
 @dataclass
@@ -188,7 +203,7 @@ async def ws_handler(request):
     if origin != expected:
         raise web.HTTPForbidden(text="WebSocket origin rejected")
     # These are operational limits, not a complete public-service abuse defence.
-    ip = request.remote or "unknown"
+    ip = client_rate_key(request)
     registry = request.app["registry"]
     ws = web.WebSocketResponse(max_msg_size=MAX_MESSAGE_BYTES, heartbeat=25)
     await ws.prepare(request)
@@ -349,7 +364,7 @@ async def home(_):
 async def suggest_code(request):
     # This public endpoint is otherwise cheap to flood even after optimizing
     # code sampling. Keep the limit generous for shared-IP/browser use.
-    attempts = request.app["suggest_rate"][request.remote or "unknown"]
+    attempts = request.app["suggest_rate"][client_rate_key(request)]
     now = time.monotonic()
     while attempts and now - attempts[0] > 60:
         attempts.popleft()
@@ -383,10 +398,11 @@ async def secure_headers(request, handler):
     return response
 
 
-def create_app(registry=None, origin=None):
+def create_app(registry=None, origin=None, trust_render_proxy=False):
     app = web.Application(middlewares=[secure_headers], client_max_size=MAX_MESSAGE_BYTES)
     app["registry"] = registry or RoomRegistry()
     app["origin"] = origin
+    app["trust_render_proxy"] = trust_render_proxy
     app["rate"] = defaultdict(deque)
     app["join_rate"] = defaultdict(deque)
     app["suggest_rate"] = defaultdict(deque)
@@ -402,5 +418,6 @@ def create_app(registry=None, origin=None):
 if __name__ == "__main__":
     # Bind only to localhost by default. Production should use trusted HTTPS reverse proxy.
     public_origin = os.getenv("PUBLIC_ORIGIN") or os.getenv("RENDER_EXTERNAL_URL")
-    web.run_app(create_app(origin=public_origin), host=os.getenv("HOST", "127.0.0.1"),
+    web.run_app(create_app(origin=public_origin, trust_render_proxy=bool(os.getenv("RENDER_EXTERNAL_URL"))),
+                host=os.getenv("HOST", "127.0.0.1"),
                 port=int(os.getenv("PORT", "8765")))

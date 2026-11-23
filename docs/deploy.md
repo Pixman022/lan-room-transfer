@@ -23,7 +23,7 @@ GitHub Pages serves static assets only and cannot execute `server.py`; it is **n
 
 - `PORT`: injected by Render
 - `HOST=0.0.0.0`: configured in `render.yaml`
-- `RENDER_EXTERNAL_URL`: injected by Render; used for exact WebSocket Origin enforcement
+- `RENDER_EXTERNAL_URL`: injected by Render; used for exact WebSocket Origin enforcement and to enable trusted Render ingress IP extraction for request rate limits. With this environment variable present, only `CF-Connecting-IP` (single validated IPv4/IPv6 address) is accepted as the visitor IP, otherwise the socket IP is used. Never enable this trust mode on an endpoint directly reachable without Render/Cloudflare ingress; `X-Forwarded-For` is deliberately not trusted. Validate actual production header provenance separately.
 - `PUBLIC_ORIGIN` (optional): override only if using a verified custom domain; the value must be the `https://` origin
 
 ## Check whether a commit actually deployed (2026-11-23)

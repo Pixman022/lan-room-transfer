@@ -1,12 +1,13 @@
 import asyncio
 import time
 import unittest
+from types import SimpleNamespace
 from collections import deque
 from unittest.mock import patch
 
 from aiohttp.test_utils import AioHTTPTestCase
 
-from server import RoomRegistry, SUGGEST_RATE_LIMIT, create_app, prune_rate_counters, send
+from server import RoomRegistry, SUGGEST_RATE_LIMIT, client_rate_key, create_app, prune_rate_counters, send
 
 
 class ClosedSocketTests(unittest.IsolatedAsyncioTestCase):
@@ -16,6 +17,29 @@ class ClosedSocketTests(unittest.IsolatedAsyncioTestCase):
             async def send_json(self, _):
                 raise ConnectionResetError('Cannot write to closing transport')
         await send(ClosingWebSocket(), {'type': 'peer-offline'})
+
+
+class RateClientIpTests(unittest.TestCase):
+    def test_direct_mode_ignores_spoofed_proxy_headers(self):
+        request = SimpleNamespace(
+            app=create_app(), remote="192.0.2.10",
+            headers={"CF-Connecting-IP": "198.51.100.20",
+                     "X-Forwarded-For": "203.0.113.99"},
+        )
+        self.assertEqual(client_rate_key(request), "192.0.2.10")
+
+    def test_render_uses_only_valid_cloudflare_ip(self):
+        request = SimpleNamespace(
+            app=create_app(trust_render_proxy=True), remote="192.0.2.10",
+            headers={"CF-Connecting-IP": "198.51.100.20",
+                     "X-Forwarded-For": "203.0.113.99"},
+        )
+        self.assertEqual(client_rate_key(request), "198.51.100.20")
+        request.headers["CF-Connecting-IP"] = "2001:db8::abcd"
+        self.assertEqual(client_rate_key(request), "2001:db8::abcd")
+        for malformed in ("not-an-ip", "198.51.100.20, 203.0.113.99", ""):
+            request.headers["CF-Connecting-IP"] = malformed
+            self.assertEqual(client_rate_key(request), "192.0.2.10")
 
 
 class RateCounterTests(unittest.TestCase):
@@ -600,6 +624,23 @@ class SignallingTests(AioHTTPTestCase):
         await rejoined.close()
         bad = await self.client.get("/ws", headers={"Origin": "https://attacker.example"})
         self.assertEqual(bad.status, 403)
+
+
+class RenderClientIpRateIntegrationTests(AioHTTPTestCase):
+    async def get_application(self):
+        return create_app(trust_render_proxy=True)
+
+    async def test_separate_visitors_do_not_share_suggestion_limit(self):
+        a = {"CF-Connecting-IP": "198.51.100.10", "X-Forwarded-For": "203.0.113.99"}
+        b = {"CF-Connecting-IP": "198.51.100.11", "X-Forwarded-For": "203.0.113.99"}
+        for _ in range(SUGGEST_RATE_LIMIT):
+            self.assertEqual((await self.client.get("/api/suggest-code", headers=a)).status, 200)
+        self.assertEqual((await self.client.get("/api/suggest-code", headers=a)).status, 429)
+        self.assertEqual((await self.client.get("/api/suggest-code", headers=b)).status, 200)
+        self.assertEqual(len(self.app["suggest_rate"]["198.51.100.10"]), SUGGEST_RATE_LIMIT)
+        self.assertEqual(len(self.app["suggest_rate"]["198.51.100.11"]), 1)
+        self.assertNotIn("203.0.113.99", self.app["suggest_rate"],
+                         "spoofable X-Forwarded-For must not become a rate key")
 
 
 if __name__ == "__main__":
