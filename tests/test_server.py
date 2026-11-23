@@ -688,5 +688,55 @@ class RenderClientIpRateIntegrationTests(AioHTTPTestCase):
                          "spoofable X-Forwarded-For must not become a rate key")
 
 
+    async def test_render_websocket_join_rate_is_per_visitor_not_forwarded_for(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        a = {**origin, "CF-Connecting-IP": "198.51.100.10",
+             "X-Forwarded-For": "203.0.113.99"}
+        b = {**origin, "CF-Connecting-IP": "198.51.100.11",
+             "X-Forwarded-For": "203.0.113.99"}
+        # Same reverse-proxy socket and spoofable XFF; A's repeated joins
+        # must not consume B's independent rate budget.
+        for _ in range(15):
+            ws = await self.client.ws_connect("/ws", headers=a)
+            await ws.send_json({"type": "enter", "code": "PROXYRATE", "name": "A"})
+            self.assertEqual((await ws.receive_json(timeout=2))["type"], "welcome")
+            await ws.close()
+        blocked = await self.client.ws_connect("/ws", headers=a)
+        await blocked.send_json({"type": "enter", "code": "PROXYRATE", "name": "A"})
+        response = await blocked.receive_json(timeout=2)
+        self.assertEqual(response["type"], "error")
+        self.assertIn("过于频繁", response["message"])
+        await blocked.close()
+
+        independent = await self.client.ws_connect("/ws", headers=b)
+        await independent.send_json({"type": "enter", "code": "PROXYRATE", "name": "B"})
+        self.assertEqual((await independent.receive_json(timeout=2))["type"], "welcome")
+        await independent.close()
+        self.assertEqual(len(self.app["join_rate"]["198.51.100.10"]), 16)
+        self.assertEqual(len(self.app["join_rate"]["198.51.100.11"]), 1)
+        self.assertNotIn("203.0.113.99", self.app["join_rate"])
+
+    async def test_render_websocket_upgrade_rate_is_per_visitor(self):
+        origin = {"Origin": str(self.server.make_url("/"))[:-1]}
+        a = {**origin, "CF-Connecting-IP": "198.51.100.10",
+             "X-Forwarded-For": "203.0.113.99"}
+        b = {**origin, "CF-Connecting-IP": "198.51.100.11",
+             "X-Forwarded-For": "203.0.113.99"}
+        with patch("server.WS_UPGRADE_RATE_LIMIT", 2):
+            first = await self.client.ws_connect("/ws", headers=a)
+            second = await self.client.ws_connect("/ws", headers=a)
+            with self.assertRaises(WSServerHandshakeError) as rejected:
+                await self.client.ws_connect("/ws", headers=a)
+            self.assertEqual(rejected.exception.status, 429)
+            separate = await self.client.ws_connect("/ws", headers=b)
+            self.assertFalse(separate.closed)
+            await first.close()
+            await second.close()
+            await separate.close()
+        self.assertEqual(len(self.app["ws_upgrade_rate"]["198.51.100.10"]), 2)
+        self.assertEqual(len(self.app["ws_upgrade_rate"]["198.51.100.11"]), 1)
+        self.assertNotIn("203.0.113.99", self.app["ws_upgrade_rate"])
+
+
 if __name__ == "__main__":
     unittest.main()
