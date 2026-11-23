@@ -54,6 +54,33 @@ class RoomUnitTests(unittest.TestCase):
         self.assertIs(joined, room)
         self.assertFalse(created)
 
+    def test_suggest_code_samples_free_code_without_scanning_all_10000(self):
+        rooms = RoomRegistry()
+        class StubWs:
+            closed = False
+        rooms.enter("0001", "PC", StubWs())
+        with patch("server.secrets.randbelow", side_effect=[1, 23]) as draw, \
+             patch("server.secrets.choice") as scan_choice:
+            self.assertEqual(rooms.suggest_code(), "0023")
+            self.assertEqual(draw.call_count, 2)
+            scan_choice.assert_not_called()
+        self.assertEqual(len(rooms.rooms), 1, "suggestions must never reserve a code")
+
+    def test_suggest_code_dense_fallback_and_exhaustion(self):
+        rooms = RoomRegistry()
+        class LiveRoom:
+            def online(self):
+                return [True]
+        rooms.rooms = {f"{n:04d}": LiveRoom() for n in range(10000) if n != 42}
+        with patch("server.secrets.randbelow", return_value=0), \
+             patch("server.secrets.choice", return_value="0042") as choose:
+            self.assertEqual(rooms.suggest_code(), "0042")
+            choose.assert_called_once_with(["0042"])
+        rooms.rooms["0042"] = LiveRoom()
+        with patch("server.secrets.randbelow", return_value=0), \
+             self.assertRaisesRegex(ValueError, "四位随机码已用完"):
+            rooms.suggest_code()
+
     def test_failed_enter_does_not_leave_empty_room(self):
         rooms = RoomRegistry()
         with self.assertRaisesRegex(ValueError, "设备名称"):
