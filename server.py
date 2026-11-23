@@ -62,6 +62,13 @@ class RoomRegistry:
 
     def suggest_code(self):
         self.sweep()
+        # Avoid allocating the entire 10,000-code space on each public GET.
+        # Rejection sampling still chooses uniformly among unused codes.
+        for _ in range(64):
+            code = f"{secrets.randbelow(10000):04d}"
+            if code not in self.rooms:
+                return code
+        # If nearly all codes are busy, fall back to the complete free set.
         available = [f"{n:04d}" for n in range(10000) if f"{n:04d}" not in self.rooms]
         if not available:
             raise ValueError("四位随机码已用完")
