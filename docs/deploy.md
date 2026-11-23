@@ -29,7 +29,7 @@ GitHub Pages serves static assets only and cannot execute `server.py`; it is **n
 ## Known blockers before calling this production
 
 1. Route heuristic is **not** proof of LAN-only transport, especially VPN/public IPv6/hidden address cases; fail closed when unverifiable and run on-device network tests.
-2. Browser receives a maximum of 32 MiB per file in this POC; automatic save and directory-picker behavior are not complete.
+2. The fixed 32 MiB application-side limit was removed **for experimental testing only**. Both sides still hash whole-file ArrayBuffers and the receiver buffers the entire file in memory. Large files can exhaust memory or stall, particularly on mobile; reliable 100 MiB–1 GiB support, streaming save, resume and save-location UI are **not** proven.
 3. Four-digit codes are guessable; anonymous room membership exposes presence/metadata to anyone who obtains the code.
 4. Render Free can sleep or restart; current rooms are in memory and disappear on process restart.
 5. No complete production-grade abuse prevention or persistent multi-instance session coordination.

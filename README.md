@@ -76,9 +76,9 @@ python -m unittest discover -s tests -v
 node --test tests/*.test.mjs
 ```
 
-The offline `python tests/offline_room_ui.py` harness (Playwright/Chromium) validates device names, uploading with no peers, announcements to all verified devices, late-join catalog synchronization, withdrawal, receive controls, queue display, rename, and desktop/mobile overflow with mocked peers. Generated screenshots in `docs/*-static.png` are fixture-based UI demonstrations, not evidence of working device-to-device transfer.
+GitHub Actions now configures a separate **`browser-ui`** job with Playwright-managed Chromium. It runs `python tests/offline_room_ui.py` against a mock peer controller at **desktop and mobile** sizes, then starts the real local `server.py` and runs `python tests/browser_smoke.py` to check actual browser room entry, WebSocket presence, rename and file staging in two independent Chromium contexts on the **same CI machine**. Review that job's status and screenshot artifact; this does **not** prove WebRTC transfer between separate physical devices, VPN isolation, or file bytes on a LAN.
 
-The optional `tests/browser_smoke.py` requires Playwright/Chromium and a locally running server. It was not successfully run in the current isolated execution environment because Chromium's administrator policy blocks local HTTP connections. Static desktop/mobile screenshots in `docs/` were rendered without network access and do **not** constitute a functional browser test.
+For local browser checks, install `playwright` (for example, `pip install 'playwright>=1.55,<2'`), run `python -m playwright install chromium`, then `python tests/offline_room_ui.py`; run `python server.py` in another terminal before `python tests/browser_smoke.py`. Override `CHROMIUM_BINARY` only when intentionally using a system-installed browser. Mock screenshots (`docs/*-static.png`) and local-server smoke screenshots (`docs/*-ui.png`) are UI evidence only, not physical file-transfer acceptance.
 
 ## What is NOT proven / NOT production-ready
 
@@ -112,7 +112,7 @@ tests/device-name.test.mjs  random name and persistence unit tests
 tests/room-code.test.mjs    random room code and custom code validation tests
 tests/offline_room_ui.py   interactive mock-peer browser checks and screenshots
 tests/screenshot_static.py  compatible wrapper for the offline screenshot harness
-tests/browser_smoke.py     optional live signalling Chromium smoke test (environment-dependent)
+tests/browser_smoke.py     local HTTP/WebSocket Chromium smoke (same host, not physical LAN)
 docs/limitations.md        risk register and next decisions
 docs/test-matrix.md        manual field test plan
 ```

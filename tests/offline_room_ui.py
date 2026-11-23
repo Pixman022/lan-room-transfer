@@ -1,5 +1,6 @@
 """Offline DOM test for room-wide ephemeral file sharing (no real WebRTC)."""
 from pathlib import Path
+import os
 import re
 from playwright.sync_api import sync_playwright
 
@@ -20,7 +21,11 @@ html = html.replace('</body>', '<script>\n' +
                     'if (!crypto.randomUUID) crypto.randomUUID = () => "test-" + Math.random();\n' + code + '\n</script></body>')
 
 with sync_playwright() as playwright:
-    browser = playwright.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    binary = os.getenv('CHROMIUM_BINARY')
+    options = {'headless': True}
+    if binary:
+        options['executable_path'] = binary
+    browser = playwright.chromium.launch(**options)
     for width, height, label in [(1300, 900, 'desktop'), (390, 844, 'mobile')]:
         page = browser.new_page(viewport={'width': width, 'height': height}, device_scale_factor=1)
         errors = []
@@ -184,7 +189,10 @@ with sync_playwright() as playwright:
             });
             return absent && !d.state.peers.has('stale-peer');
         }''')
-        assert page.locator('#connection-status').inner_text() == '房间已连接'
+        # A visual-only room mock has no actual WebSocket session; it must
+        # not claim that the live room is connected.
+        assert page.locator('#connection-status').inner_text() == '正在恢复连接'
+        assert page.locator('#connection-status').get_attribute('data-state') == 'waiting'
         assert page.locator('#toggle-diagnostics').count() == 1
         # A file can be shared before another device arrives.
         with page.expect_file_chooser() as chooser:
@@ -203,6 +211,8 @@ with sync_playwright() as playwright:
                                              ['peer-2','Silver Otter',true],
                                              ['peer-3','Sky Owl',false]]) {
                 const peer = {id, name, ready, reason:'等待局域网连接',
+                    attempt:1, stage:'mock-ready', attemptHistory:[], startedAt:Date.now(),
+                    readyAt:ready ? Date.now() : null,
                     sending:new Map(), syncedOffers:new Set(), pc:{close(){}},
                     channel:{readyState:'open', send: data =>
                         window.__messages.push({id, packet:JSON.parse(data)})}};
@@ -224,11 +234,15 @@ with sync_playwright() as playwright:
         }''')
         assert page.locator('#peer-list .device-row').count() == 3
         assert page.locator('#peer-list button').count() == 0
-        assert page.locator('#connection-status').inner_text() == '文件直连就绪'
+        # Fake ready peers do not override the intentionally missing WebSocket:
+        # a room cannot claim full connectivity with signalling disconnected.
+        assert page.locator('#connection-status').inner_text() == '正在恢复连接'
+        assert page.locator('#connection-status').get_attribute('data-state') == 'waiting'
         assert '可供 2 台设备接收' in page.locator('#sent-files .file-row').inner_text()
         page.locator('#toggle-diagnostics').click()
         assert page.locator('#diagnostics-panel').is_visible()
-        assert page.locator('#diagnostics-content .diagnostic-line').count() == 14
+        # Selected-path details and signal errors add optional diagnostic rows.
+        assert page.locator('#diagnostics-content .diagnostic-line').count() >= 14
         assert '设备：3' in page.locator('#diagnostics-panel').inner_text()
         page.locator('#toggle-diagnostics').click()
         assert page.locator('#diagnostics-panel').is_hidden()
@@ -263,6 +277,7 @@ with sync_playwright() as playwright:
             const d = window.__demo;
             const id = 'peer-4';
             const peer = {id, name:'Violet Wolf', ready:true, syncedOffers:new Set(),
+                attempt:1, stage:'mock-ready', attemptHistory:[], startedAt:Date.now(), readyAt:Date.now(),
                 sending:new Map(), pc:{close(){}}, channel:{readyState:'open', send: data =>
                 window.__messages.push({id, packet:JSON.parse(data)})}};
             d.state.peers.set(id, peer); d.syncSharedOffers(peer); d.renderPeers();
