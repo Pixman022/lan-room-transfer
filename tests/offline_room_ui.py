@@ -1,5 +1,6 @@
 """Offline DOM test for room-wide ephemeral file sharing (no real WebRTC)."""
 from pathlib import Path
+import os
 import re
 from playwright.sync_api import sync_playwright
 
@@ -20,7 +21,11 @@ html = html.replace('</body>', '<script>\n' +
                     'if (!crypto.randomUUID) crypto.randomUUID = () => "test-" + Math.random();\n' + code + '\n</script></body>')
 
 with sync_playwright() as playwright:
-    browser = playwright.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    binary = os.getenv('CHROMIUM_BINARY')
+    options = {'headless': True}
+    if binary:
+        options['executable_path'] = binary
+    browser = playwright.chromium.launch(**options)
     for width, height, label in [(1300, 900, 'desktop'), (390, 844, 'mobile')]:
         page = browser.new_page(viewport={'width': width, 'height': height}, device_scale_factor=1)
         errors = []
