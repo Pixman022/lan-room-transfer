@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent
 CODE_RE = re.compile(r"^[A-Z0-9]{4,16}$")
 MAX_ONLINE_MEMBERS = 10
 MAX_MESSAGE_BYTES = 65536
+SUGGEST_RATE_LIMIT = 60  # per source IP per rolling minute; not an anti-guessing control
 
 
 @dataclass
@@ -150,11 +151,26 @@ async def announce(room, payload, except_id=None):
             await send(other.ws, payload)
 
 
+def prune_rate_counters(app, now):
+    """Do not retain inactive per-IP request counters indefinitely."""
+    for rates in (app["rate"], app["join_rate"], app["suggest_rate"]):
+        for ip, attempts in list(rates.items()):
+            while attempts and now - attempts[0] > 60:
+                attempts.popleft()
+            if not attempts:
+                del rates[ip]
+
+
 async def sweep_rooms(app):
+    last_prune = time.monotonic()
     try:
         while True:
             await asyncio.sleep(5)
             app["registry"].sweep()
+            now = time.monotonic()
+            if now - last_prune >= 60:
+                prune_rate_counters(app, now)
+                last_prune = now
     except asyncio.CancelledError:
         pass
 
@@ -323,6 +339,16 @@ async def home(_):
 
 
 async def suggest_code(request):
+    # This public endpoint is otherwise cheap to flood even after optimizing
+    # code sampling. Keep the limit generous for shared-IP/browser use.
+    attempts = request.app["suggest_rate"][request.remote or "unknown"]
+    now = time.monotonic()
+    while attempts and now - attempts[0] > 60:
+        attempts.popleft()
+    if len(attempts) >= SUGGEST_RATE_LIMIT:
+        raise web.HTTPTooManyRequests(
+            text="请求过于频繁，请稍后重试", headers={"Retry-After": "60"})
+    attempts.append(now)
     try:
         return web.json_response({"code": request.app["registry"].suggest_code()})
     except ValueError as exc:
@@ -355,6 +381,7 @@ def create_app(registry=None, origin=None):
     app["origin"] = origin
     app["rate"] = defaultdict(deque)
     app["join_rate"] = defaultdict(deque)
+    app["suggest_rate"] = defaultdict(deque)
     app.router.add_get("/", home)
     app.router.add_get("/static/{filename}", assets)
     app.router.add_get("/api/suggest-code", suggest_code)

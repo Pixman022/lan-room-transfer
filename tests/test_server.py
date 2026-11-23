@@ -1,10 +1,12 @@
 import asyncio
+import time
 import unittest
+from collections import deque
 from unittest.mock import patch
 
 from aiohttp.test_utils import AioHTTPTestCase
 
-from server import RoomRegistry, create_app, send
+from server import RoomRegistry, SUGGEST_RATE_LIMIT, create_app, prune_rate_counters, send
 
 
 class ClosedSocketTests(unittest.IsolatedAsyncioTestCase):
@@ -14,6 +16,20 @@ class ClosedSocketTests(unittest.IsolatedAsyncioTestCase):
             async def send_json(self, _):
                 raise ConnectionResetError('Cannot write to closing transport')
         await send(ClosingWebSocket(), {'type': 'peer-offline'})
+
+
+class RateCounterTests(unittest.TestCase):
+    def test_expired_clients_are_reclaimed_and_active_windows_stay(self):
+        app = create_app()
+        for kind in ("rate", "join_rate", "suggest_rate"):
+            app[kind]["stale"] = deque([1.0])
+            app[kind]["active"] = deque([150.0])
+            app[kind]["mixed"] = deque([1.0, 150.0])
+        prune_rate_counters(app, 160.0)
+        for kind in ("rate", "join_rate", "suggest_rate"):
+            self.assertNotIn("stale", app[kind])
+            self.assertEqual(list(app[kind]["active"]), [150.0])
+            self.assertEqual(list(app[kind]["mixed"]), [150.0])
 
 
 class RoomUnitTests(unittest.TestCase):
@@ -463,6 +479,25 @@ class SignallingTests(AioHTTPTestCase):
         response = await self.client.get("/static/device-name.js")
         self.assertEqual(response.status, 200)
         self.assertIn("generateDeviceName", await response.text())
+
+    async def test_public_room_code_suggestion_has_a_rolling_ip_limit(self):
+        for _ in range(SUGGEST_RATE_LIMIT):
+            response = await self.client.get("/api/suggest-code")
+            self.assertEqual(response.status, 200)
+        blocked = await self.client.get("/api/suggest-code")
+        self.assertEqual(blocked.status, 429)
+        self.assertEqual(blocked.headers["Retry-After"], "60")
+        self.assertEqual(len(self.app["registry"].rooms), 0,
+                         "suggestions never reserve a room")
+        health = await self.client.get("/health")
+        self.assertEqual(health.status, 200)
+
+        # Expiring the previous window must allow a fresh suggestion.
+        attempts = next(iter(self.app["suggest_rate"].values()))
+        attempts.clear()
+        attempts.append(time.monotonic() - 61)
+        resumed = await self.client.get("/api/suggest-code")
+        self.assertEqual(resumed.status, 200)
 
     async def test_room_code_suggestion_is_not_occupied_and_module_is_served(self):
         first = await self.client.get("/api/suggest-code")
