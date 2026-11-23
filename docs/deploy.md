@@ -26,6 +26,37 @@ GitHub Pages serves static assets only and cannot execute `server.py`; it is **n
 - `RENDER_EXTERNAL_URL`: injected by Render; used for exact WebSocket Origin enforcement
 - `PUBLIC_ORIGIN` (optional): override only if using a verified custom domain; the value must be the `https://` origin
 
+## Check whether a commit actually deployed (2026-11-23)
+
+A green GitHub Actions result and a merged `main` commit do **not** prove
+the hosted service is running that revision. Compare the latest `main` SHA
+with the commit shown under the Render service's **Deploys** page.
+
+On 2026-11-23, `main` reached `801875d` with passing CI while the
+Render service still reported `124ec0a` as Live. The Render service API
+reported `autoDeploy=yes`, `autoDeployTrigger=commit` and branch `main`;
+however, recent deploys had API triggers and no deploy for `801875d`.
+The cause of this missing automatic trigger is **not confirmed**.
+
+For the service owner to inspect:
+
+1. In Render service **Settings**, confirm linked GitHub repository,
+   branch `main`, Auto-Deploy = **On Commit**, and any build filters.
+2. Check the Render GitHub App installation allows
+   `Pixman022/lan-room-transfer`; also inspect the service's Git
+   credentials in Render Settings.
+3. Reconcile the Render **Events** and **Deploys** pages with the GitHub
+   `main` commit and CI run. If authorization is corrected, verify a later
+   normal merge triggers a deploy before calling auto-deploy restored.
+4. If an immediate rollout is necessary and the GitHub integration is
+   still unavailable, the service owner can use Render's **Manual Deploy →
+   Deploy latest commit**. Confirm the Live SHA and `/health` afterward.
+   Do not deploy a specific historical commit as a workaround.
+
+Render references:
+[deploys](https://render.com/docs/deploys) ·
+[Git provider authorization](https://render.com/docs/git-provider).
+
 ## Known blockers before calling this production
 
 1. Route heuristic is **not** proof of LAN-only transport, especially VPN/public IPv6/hidden address cases; fail closed when unverifiable and run on-device network tests.
