@@ -20,6 +20,12 @@ from aiohttp import WSMsgType, web
 
 ROOT = Path(__file__).resolve().parent
 CODE_RE = re.compile(r"^[A-Z0-9]{4,16}$")
+# The ICE candidate type is the token after the address and port, not
+# any later appearance of "typ host" in attacker-controlled extensions.
+HOST_CANDIDATE_RE = re.compile(
+    r"\\Acandidate:\\S+[ \\t]+\\d+[ \\t]+\\S+[ \\t]+\\d+[ \\t]+\\S+[ \\t]+\\d+"
+    r"[ \\t]+typ[ \\t]+host(?=[ \\t]|\\Z)"
+)
 MAX_ONLINE_MEMBERS = 10
 MAX_MESSAGE_BYTES = 65536
 SUGGEST_RATE_LIMIT = 60  # per client IP per rolling minute; not an anti-guessing control
@@ -347,7 +353,7 @@ async def ws_handler(request):
                         raise ValueError("ICE 候选信息包含多余字段")
                     raw = candidate.get("candidate")
                     if (not isinstance(raw, str) or len(raw) > 4096 or
-                            (raw != "" and (not raw.startswith("candidate:") or not re.search(r"\btyp host\b", raw)))):
+                            (raw != "" and not HOST_CANDIDATE_RE.match(raw))):
                         raise ValueError("仅允许 host ICE 候选或候选收集结束标记")
                     if candidate.get("sdpMid") is not None and (not isinstance(candidate["sdpMid"], str) or len(candidate["sdpMid"]) > 64):
                         raise ValueError("sdpMid 无效")
