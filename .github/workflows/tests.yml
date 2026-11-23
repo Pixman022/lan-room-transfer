@@ -14,6 +14,10 @@ jobs:
         with:
           node-version: '22'
       - run: pip install -r requirements.txt
+      # ubuntu-latest includes pwsh; fail if unavailable instead of silently
+      # skipping the local-only hash verifier smoke checks.
+      - name: Require PowerShell for saved-file verifier tests
+        run: pwsh --version
       - run: python -m unittest discover -s tests -q
       - run: node --test tests/*.test.mjs
 
