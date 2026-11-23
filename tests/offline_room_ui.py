@@ -58,6 +58,12 @@ with sync_playwright() as playwright:
         assert page.locator('#device-name').count() == 0
         assert page.locator('#room-device-name').count() == 0
         assert re.fullmatch(r'[A-Z][a-z]+ [A-Z][a-z]+', page.locator('#home-device-label').inner_text())
+        # A randomly assigned default can already be "Coral Fox". In that
+        # case make one real edit first, so the toast assertion is deterministic.
+        if page.locator('#home-device-label').inner_text() == 'Coral Fox':
+            page.locator('#edit-home-device-name').click()
+            page.locator('#home-device-label').fill('Amber Bear')
+            page.locator('#home-device-label').press('Enter')
         page.locator('#edit-home-device-name').click()
         assert page.locator('#home-device-label').get_attribute('contenteditable') == 'plaintext-only'
         page.locator('#home-device-label').fill('Coral Fox')
@@ -65,7 +71,7 @@ with sync_playwright() as playwright:
         assert page.locator('#home-device-label').inner_text() == 'Coral Fox'
         assert page.locator('#home-device-label').get_attribute('contenteditable') == 'false'
         assert page.locator('#home-device-avatar').inner_text() == '🦊'
-        assert page.locator('#toast').is_visible()
+        page.locator('#toast').wait_for(state='visible', timeout=2000)
         assert page.locator('#toast-message').inner_text() == '设备名称已修改'
         assert page.locator('#toast').get_attribute('role') == 'status'
         bounds = page.locator('#toast').bounding_box()
