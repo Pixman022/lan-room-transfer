@@ -476,16 +476,40 @@ class SignallingTests(AioHTTPTestCase):
             "type": "candidate", "candidate": {"candidate": "", "sdpMid": "0", "sdpMLineIndex": 0}}})
         forwarded = await b.receive_json()
         self.assertEqual(forwarded["signal"]["candidate"]["candidate"], "")
-        # Valid host candidates may end with "typ host" (no trailing space).
+        # Valid host candidates may end with "typ host" (no trailing space),
+        # and include mDNS/IPv6 addresses, TCP transport and ICE extensions.
         host = "candidate:1 1 udp 100 192.168.1.5 5555 typ host"
-        for raw in [host, host + " generation 0"]:
+        valid = (
+            host,
+            host + " generation 0",
+            "candidate:2 1 UDP 2113937151 abc123.local 58555 typ host network-id 1",
+            "candidate:3 1 udp 100 2001:db8::1 5555 typ host",
+            "candidate:4 1 tcp 1518280447 device.local 9 typ host tcptype passive",
+        )
+        for raw in valid:
             await a.send_json({"type": "signal", "to": b_welcome["id"], "toGeneration": b_welcome["generation"], "signal": {
                 "type": "candidate", "candidate": {"candidate": raw, "sdpMid": "0"}}})
             self.assertEqual((await b.receive_json())["signal"]["candidate"]["candidate"], raw)
+
+        # An unrelated later "typ host" token must not camouflage the actual
+        # non-host candidate type or a missing candidate grammar prefix.
+        invalid = (
+            "candidate:1 1 udp 1 203.0.113.1 11111 typ srflx",
+            "candidate:1 1 udp 1 203.0.113.1 11111 typ relay raddr 0.0.0.0 rport 9 typ host",
+            "candidate:1 1 udp 1 203.0.113.1 11111 typ srflx generation 0 typ host",
+            "candidate:1 1 udp 1 203.0.113.1 11111 typ host-extra",
+            "candidate:1 1 typ host 203.0.113.1 11111 typ relay",
+        )
+        for raw in invalid:
+            await a.send_json({"type": "signal", "to": b_welcome["id"], "toGeneration": b_welcome["generation"], "signal": {
+                "type": "candidate", "candidate": {"candidate": raw, "sdpMid": "0"}}})
+            self.assertEqual((await a.receive_json(timeout=2))["type"], "error")
+
+        # A valid final candidate must be the next message received by B:
+        # otherwise a forbidden candidate leaked into the forwarded queue.
         await a.send_json({"type": "signal", "to": b_welcome["id"], "toGeneration": b_welcome["generation"], "signal": {
-            "type": "candidate", "candidate": {
-                "candidate": "candidate:1 1 udp 1 203.0.113.1 11111 typ srflx", "sdpMid": "0"}}})
-        self.assertEqual((await a.receive_json())["type"], "error")
+            "type": "candidate", "candidate": {"candidate": host, "sdpMid": "0"}}})
+        self.assertEqual((await b.receive_json(timeout=2))["signal"]["candidate"]["candidate"], host)
         await a.close()
         await b.close()
 
