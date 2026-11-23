@@ -34,7 +34,7 @@ with sync_playwright() as playwright:
     # Observe the real sockets so the smoke test can cause an unexpected
     # signalling-only close without mutating production application code.
     for context in (one, two):
-        context.add_init_script("""() => {
+        context.add_init_script("""(() => {
             const NativeWebSocket = window.WebSocket;
             window.__smokeWebSockets = [];
             window.WebSocket = class TrackedWebSocket extends NativeWebSocket {
@@ -43,7 +43,7 @@ with sync_playwright() as playwright:
                     window.__smokeWebSockets.push(this);
                 }
             };
-        }""".replace("() => {", "(() => {").replace("\n        }", "\n        })()"))
+        })();""")
     a, b = one.new_page(), two.new_page()
     errors = []
     for page in (a, b):
