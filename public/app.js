@@ -169,6 +169,12 @@ function broadcastRoomHandoff() {
     sources: [...state.outbound].map(([offerId, files]) => ({
       offerId, files: [...files].map(([fileId, file]) => ({ fileId, file })),
     })),
+    // Keep the source handles and their visible file metadata together.
+    // The regular UI snapshot is coalesced, so an owner leaving immediately
+    // after Share must not leave a follower with files but no file-list entry.
+    ownOffers: state.ownOffers.map(offer => ({
+      offerId: offer.offerId, files: offer.files.map(file => ({ ...file })),
+    })),
     saved: state.jobs.filter(job => job.blob && job.url).map(job => ({
       key: roomJobKey(job), blob: job.blob,
     })),
@@ -207,6 +213,11 @@ function updateMirrorResources(mirror, message) {
   mirror.sources = new Map((message.sources || []).map(offer => [
     offer.offerId, new Map(offer.files.map(item => [item.fileId, item.file])),
   ]));
+  if (Array.isArray(message.ownOffers)) {
+    mirror.sharedOffers = message.ownOffers.map(offer => ({
+      offerId: offer.offerId, files: offer.files.map(file => ({ ...file })),
+    }));
+  }
   for (const item of message.saved || []) {
     if (!(item.blob instanceof Blob)) continue;
     mirror.savedBlobs.set(item.key, item.blob);
@@ -215,6 +226,11 @@ function updateMirrorResources(mirror, message) {
     }
   }
   if (mirror.view) {
+    if (mirror.sharedOffers) {
+      mirror.view.ownOffers = mirror.sharedOffers;
+      state.ownOffers = mirror.sharedOffers;
+      renderSentFiles();
+    }
     for (const job of state.jobs) {
       const url = mirror.savedUrls.get(roomJobKey(job));
       if (url) job.url = url;
@@ -232,7 +248,7 @@ function applyMirroredView(view) {
   state.lastRoomEntry = view.roomEntry;
   state.generation = view.connected ? 'mirrored' : '';
   state.peers = new Map(view.peers.map(peer => [peer.id, peer]));
-  state.ownOffers = view.ownOffers;
+  state.ownOffers = mirror.sharedOffers || view.ownOffers;
   state.offers = new Map(view.offers.map(offer => [`${offer.peerId}:${offer.offerId}`, offer]));
   state.jobs = view.jobs.map(job => ({ ...job, chunks: [],
     url: mirror.savedUrls.get(roomJobKey(job)) || job.url }));
@@ -314,7 +330,7 @@ function promoteMirroredRoom(mirror) {
   state.peers = new Map();
   state.offers = new Map();
   state.outbound = mirror.sources;
-  state.ownOffers = view.ownOffers.filter(offer => {
+  state.ownOffers = (mirror.sharedOffers || view.ownOffers).filter(offer => {
     const files = mirror.sources.get(offer.offerId);
     offer.files = offer.files.filter(file => files?.has(file.id));
     return offer.files.length;
@@ -2401,6 +2417,10 @@ $('leave-room').onclick = () => {
     return;
   }
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
+  // Flush the final source+metadata state before releasing the room lock.
+  // Otherwise a pending 120 ms UI update can be cancelled by Leave.
+  broadcastRoomHandoff();
+  broadcastRoomView();
   state.leaving = true;
   stopReconnect();
   stopSignalKeepalive();
