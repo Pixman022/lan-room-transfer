@@ -246,6 +246,14 @@ with sync_playwright() as playwright:
     survivor.locator('#room-screen').wait_for(state='visible')
     survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
     assert survivor.evaluate('window.__smokeWebSockets.length') == 0
+    third = one.new_page()
+    third.goto(ROOT)
+    third.locator('#room-code-input').fill('ABRUPT26')
+    third.locator('#enter-room').click()
+    third.locator('#room-screen').wait_for(state='visible')
+    third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
+    assert third.evaluate('window.__smokeWebSockets.length') == 0
+
     abrupt.close()
     survivor.wait_for_function("""() =>
         window.__smokeWebSockets.length === 1 &&
@@ -255,7 +263,21 @@ with sync_playwright() as playwright:
     assert survivor.locator('#room-name').inner_text() == 'ABRUPT26'
     assert survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').is_visible()
     assert '房间同步中断' not in survivor.locator('#feedback').inner_text()
-    survivor.locator('#leave-room').click()
+    assert third.evaluate('window.__smokeWebSockets.length') == 0
+    third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
+
+    # With three same-room tabs, the final surviving tab must also take over
+    # the same room and its staged File after the second owner disappears.
+    survivor.close()
+    third.wait_for_function("""() =>
+        window.__smokeWebSockets.length === 1 &&
+        window.__smokeWebSockets[0].readyState === WebSocket.OPEN &&
+        document.getElementById('room-screen').hidden === false
+    """, timeout=15000)
+    assert third.locator('#room-name').inner_text() == 'ABRUPT26'
+    assert third.locator('#sent-files').get_by_text('survive-owner-close.bin').is_visible()
+    third.locator('#leave-room').click()
+    third.locator('#home-screen').wait_for(state='visible')
     browser.close()
     print('PASS: same-room automatic owner-tab election, staged File retention, mirror controls, R05/R06')
     print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
