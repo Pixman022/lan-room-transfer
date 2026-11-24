@@ -2107,11 +2107,12 @@ test('entry button shows connecting progress, blocks repeat clicks and resets af
   const button = t.elements.get('enter-room');
   const icon = t.run("document.getElementById('entry-loading-icon')");
   const label = t.run("document.getElementById('entry-button-label')");
-  t.run("document.getElementById('enter-room').onclick()");
+  const initialEntry = t.run("document.getElementById('enter-room').onclick()");
   assert.equal(button.disabled, true, 'button disabled while joining');
   assert.equal(icon.hidden, false, 'spinner visible while joining');
   assert.equal(label.textContent, '正在连接房间…');
   button.onclick();
+  await initialEntry; // The room-tab lease is acquired asynchronously.
   assert.equal(t.FakeWebSocket.sockets.length, 1, 'second click does not create a second socket');
   await join(t, t.FakeWebSocket.sockets[0]);
   assert.equal(button.disabled, false, 'button reset when room welcomes device');
@@ -2119,7 +2120,7 @@ test('entry button shows connecting progress, blocks repeat clicks and resets af
   assert.equal(label.textContent, '进入房间');
 
   const failed = harness();
-  failed.run("document.getElementById('enter-room').onclick()");
+  await failed.run("document.getElementById('enter-room').onclick()");
   const socket = failed.FakeWebSocket.sockets[0];
   socket.open();
   await failed.run("handleServer({type:'error',message:'房间已满'})");
