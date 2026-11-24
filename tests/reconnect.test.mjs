@@ -2558,3 +2558,62 @@ test('surviving tab takes over room but never inherits departed tabs source file
   assert.deepEqual([...t.state.outbound.keys()], ['from-B','from-C']);
   assert.equal(t.FakeWebSocket.sockets.length,1,'room transport reconnect remains enabled');
 });
+
+
+test('explicit Leave in transport tab broadcasts group exit and releases the room', () => {
+  const t = harness();
+  t.run(`window.groupEvents = [];
+    state.code = '5832';
+    currentRoomExitRevision = readRoomExitRevision('5832');
+    ownerRoomChannel = {
+      code:'5832', heartbeat:null,
+      channel:{postMessage(msg){window.groupEvents.push(msg)}, close(){}},
+    };
+    roomTabLease = {code:'5832',release(){window.lockReleased=true}};
+    state.ownOffers=[{offerId:'from-A',ownerTabId:localRoomTabId,files:[{id:'f',name:'a.bin',size:1}]}];
+    state.outbound=new Map([['from-A',new Map([['f',new Blob(['a'])]])]]);
+    document.getElementById('leave-room').onclick();`);
+  assert.equal(t.state.code, '');
+  assert.equal(t.state.ownOffers.length, 0);
+  assert.equal(t.state.outbound.size, 0);
+  assert.equal(t.run('window.lockReleased'), true);
+  assert.equal(t.run("window.groupEvents.filter(x => x.type === 'leave-all').length"), 1);
+  assert.equal(t.run("window.groupEvents.filter(x => x.type === 'owner-changing').length"), 0,
+    'intentional group Leave must not ask a follower to take over');
+  assert.notEqual(t.run("readRoomExitRevision('5832')"), '',
+    'persistent per-room exit revision guards delayed tabs');
+});
+
+test('explicit Leave in a mirrored tab exits the whole group, not tab-left only', () => {
+  const t = harness();
+  t.run(`window.groupEvents = [];
+    state.code='5832';
+    currentRoomExitRevision = readRoomExitRevision('5832');
+    mirroredRoom = {
+      code:'5832', savedUrls:new Map(), exitRevision:currentRoomExitRevision,
+      channel:{postMessage(msg){window.groupEvents.push(msg)},close(){}},
+      takeoverAbort:{abort(){window.abortCalled=true}},
+      watchdog:null,
+    };
+    document.getElementById('leave-room').onclick();`);
+  assert.equal(t.state.code, '');
+  assert.equal(t.run('mirroredRoom'), null);
+  assert.equal(t.run('window.abortCalled'), true);
+  assert.equal(t.run("window.groupEvents.filter(x => x.type === 'leave-all').length"), 1);
+  assert.equal(t.run("window.groupEvents.filter(x => x.type === 'tab-left').length"), 0);
+  assert.notEqual(t.run("readRoomExitRevision('5832')"), '');
+});
+
+test('closing a mirrored view never sets the deliberate room-exit marker', () => {
+  const t = harness();
+  t.run(`window.events = [];
+    mirroredRoom = {
+      code:'5832',savedUrls:new Map(),
+      channel:{postMessage(msg){window.events.push(msg)},close(){}},
+      watchdog:null,
+    };
+    closeMirroredRoom();`);
+  assert.equal(t.run("window.events.filter(x => x.type === 'tab-left').length"), 1);
+  assert.equal(t.run("window.events.filter(x => x.type === 'leave-all').length"), 0);
+  assert.equal(t.run("readRoomExitRevision('5832')"), '');
+});

@@ -192,21 +192,24 @@ window.__smokeMirrorFileData = async () => {
     a.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert a.locator('#peer-list strong').inner_text() == 'Mobile Phone'
 
-    # Closing a follower's view withdraws its own shares, but must not
-    # disconnect the room or withdraw another tab's source files.
+    # Closing a follower *tab* withdraws only its shares; it does not
+    # initiate the explicit all-tab Leave action.
     with duplicate.expect_file_chooser() as local_chooser:
         duplicate.locator('#drop-zone').click()
     local_chooser.value.set_files({
         'name':'mirror-exit.txt', 'mimeType':'text/plain', 'buffer':b'local-follower',
     })
     a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
-    duplicate.locator('#leave-room').click()
-    duplicate.locator('#home-screen').wait_for(state='visible')
+    duplicate.close()
     a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for(state='detached')
     a.locator('#sent-files').get_by_text('smoke.txt').wait_for()
     assert a.locator('#room-screen').is_visible()
     assert b.locator('#room-screen').is_visible()
     assert a.evaluate('window.__smokeWebSockets.length') == 1
+    duplicate = one.new_page()
+    duplicate.on('pageerror', lambda err: errors.append(str(err)))
+    duplicate.goto(ROOT)
+    duplicate.locator('#room-code-input').fill('HOME2026')
     duplicate.locator('#enter-room').click()
     duplicate.locator('#room-screen').wait_for(state='visible')
     duplicate.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
@@ -263,10 +266,9 @@ window.__smokeMirrorFileData = async () => {
     assert 'mirror-stay.txt' in a.locator('#sent-files').inner_text()
     a.locator('#toggle-diagnostics').click()
     assert not errors, errors
-    a.locator('#leave-room').click()
-    a.locator('#home-screen').wait_for(state='visible')
-    # Exiting the owner tab withdraws only files selected by that tab;
-    # independently selected mirror files remain with the surviving tab.
+    a.close()
+    # Closing (not explicitly leaving) the owner tab causes takeover. Only
+    # files selected by that closed tab are withdrawn.
     duplicate.wait_for_function("""() =>
         window.__smokeWebSockets.length === 1 &&
         window.__smokeWebSockets[0].readyState === WebSocket.OPEN &&
@@ -358,7 +360,7 @@ window.__smokeMirrorFileData = async () => {
     third.locator('#leave-room').click()
     third.locator('#home-screen').wait_for(state='visible')
 
-    # A newly shared file disappears when its selecting tab immediately exits,
+    # A newly shared file disappears when its selecting tab closes,
     # even before the next coalesced UI snapshot is emitted.
     quick = one.new_page()
     quick.goto(ROOT)
@@ -383,7 +385,7 @@ window.__smokeMirrorFileData = async () => {
         'name':'fast-exit.txt', 'mimeType':'text/plain', 'buffer':b'content-survives',
     })
     # Intentionally DO NOT wait for the follower's file shelf to update.
-    quick.locator('#leave-room').click()
+    quick.close()
     quick_follower.wait_for_function("""() =>
         window.__smokeWebSockets.length === 1 &&
         window.__smokeWebSockets[0].readyState === WebSocket.OPEN
@@ -392,6 +394,53 @@ window.__smokeMirrorFileData = async () => {
     quick_follower.locator('#sent-files').get_by_text('still-open.txt').wait_for()
     assert [row['bytes'] for row in quick_follower.evaluate('window.__smokeOwnFileData()')] == [list(b'still-open')], 'surviving tab lost its independently selected file'
     quick_follower.locator('#leave-room').click()
+
+    # Deliberate "退出房间" is different from closing a tab: clicking it in
+    # ANY same-profile view exits all tabs for this room, while a member in an
+    # independent browser profile remains in the room.
+    group_a = one.new_page()
+    group_b = one.new_page()
+    group_c = one.new_page()
+    outside = two.new_page()
+    for page in (group_a, group_b, group_c, outside):
+        page.on('pageerror', lambda err: errors.append(str(err)))
+        page.goto(ROOT)
+        page.locator('#room-code-input').fill('QUITALL1')
+        page.locator('#enter-room').click()
+        page.locator('#room-screen').wait_for(state='visible')
+    outside.locator('#peer-list .device-row').wait_for(state='visible')
+    assert outside.locator('#peer-list .device-row').count() == 1
+    assert group_b.evaluate('window.__smokeWebSockets.length') == 0
+    assert group_c.evaluate('window.__smokeWebSockets.length') == 0
+
+    # B is only a mirrored room view. Its explicit Leave must close A/B/C.
+    group_b.locator('#leave-room').click()
+    for page in (group_a, group_b, group_c):
+        page.locator('#home-screen').wait_for(state='visible')
+    outside.locator('#peer-list .device-row').wait_for(state='hidden')
+    assert outside.locator('#room-screen').is_visible()
+    assert group_c.evaluate('window.__smokeWebSockets.length') == 0
+
+    # The user may explicitly join the same code again after group exit;
+    # a stale exit revision must not prevent a fresh user-requested join.
+    for page in (group_a, group_b, group_c):
+        page.locator('#room-code-input').fill('QUITALL1')
+        page.locator('#enter-room').click()
+        page.locator('#room-screen').wait_for(state='visible')
+    outside.locator('#peer-list .device-row').wait_for(state='visible')
+    assert outside.locator('#peer-list .device-row').count() == 1
+
+    # A holds the actual WebSocket this time; its explicit Leave still ends
+    # the entire group, not merely the transport-owning tab.
+    group_a.locator('#leave-room').click()
+    for page in (group_a, group_b, group_c):
+        page.locator('#home-screen').wait_for(state='visible')
+    outside.locator('#peer-list .device-row').wait_for(state='hidden')
+    assert outside.locator('#room-screen').is_visible()
+    outside.locator('#leave-room').click()
+    for page in (group_a, group_b, group_c, outside):
+        page.close()
+    assert not errors, errors
     browser.close()
-    print('PASS: per-tab source lifetime, surviving-tab Files, multi-tab takeover, R05/R06')
+    print('PASS: explicit Leave exits all same-profile room tabs; closing a tab preserves survivors, R05/R06')
     print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
