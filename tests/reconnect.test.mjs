@@ -2342,3 +2342,22 @@ test('pairing hides duplicate non-error status while keeping error and room feed
   t.run("feedback('无法连接房间，请重试', true)");
   assert.equal(t.elements.get('feedback').className, 'feedback error');
 });
+
+test('reused friendly names remain editable and show distinct peer labels', () => {
+  const t = harness();
+  t.state.id = 'self-id';
+  const first = {id:'member-11AA',name:'Amber Fox'};
+  const second = {id:'member-22BB',name:'Amber Fox'};
+  t.state.peers.set(first.id, first);
+  assert.equal(t.run('peerDisplayName(state.peers.get("member-11AA"))'), 'Amber Fox · 11AA',
+    'same name as this device is disambiguated');
+  t.state.peers.set(second.id, second);
+  assert.equal(t.run('peerDisplayName(state.peers.get("member-22BB"))'), 'Amber Fox · 22BB',
+    'different member with same name has different stable label');
+  t.run('saveDeviceName("Coral Fox")');
+  assert.equal(t.run('peerDisplayName(state.peers.get("member-11AA"))'), 'Amber Fox · 11AA',
+    'two other members with same name remain distinguishable');
+  t.state.peers.delete(second.id);
+  assert.equal(t.run('peerDisplayName(state.peers.get("member-11AA"))'), 'Amber Fox',
+    'unique names never get an unnecessary suffix');
+});
