@@ -130,7 +130,7 @@ with sync_playwright() as playwright:
     a.locator('#sent-files').get_by_text('mirror-shared.txt').wait_for(state='detached')
 
     rename(duplicate, '#edit-device-name', '#my-device-label', 'Mirror Rename')
-    a.locator('#my-device-label').get_by_text('Mirror Rename').wait_for()
+    a.wait_for_function("document.getElementById('my-device-label').textContent === 'Mirror Rename'")
     b.locator('#peer-list').get_by_text('Mirror Rename').wait_for()
     rename(a, '#edit-device-name', '#my-device-label', 'Updated Laptop')
     assert a.locator('#toast-message').inner_text() == '设备名称已修改'
