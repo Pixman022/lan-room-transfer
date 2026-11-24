@@ -256,9 +256,11 @@ function closeMirroredRoom() {
   if (!mirroredRoom) return;
   const mirror = mirroredRoom;
   mirror.takeoverAbort?.abort();
+  if (mirror.entryTimeout) clearTimeout(mirror.entryTimeout);
+  mirror.entryResolve?.();
   clearInterval(mirror.watchdog);
   mirror.channel.close();
-  for (const url of mirror.savedUrls.values()) URL.revokeObjectURL(url);
+  for (const url of mirror.savedUrls?.values() || []) URL.revokeObjectURL(url);
   try { sessionStorage.removeItem('lan-room-mirror-code'); }
   catch { /* Storage may be blocked. */ }
   $('qa-panel').hidden = !QA_MODE;
@@ -299,6 +301,8 @@ function promoteMirroredRoom(mirror) {
       roomEntry: null, ownOffers: [], offers: [], jobs: [] };
   }
   clearInterval(mirror.watchdog);
+  if (mirror.entryTimeout) clearTimeout(mirror.entryTimeout);
+  mirror.entryResolve?.();
   mirror.channel.close();
   mirroredRoom = null;
   const view = mirror.view;
@@ -368,24 +372,25 @@ async function openMirroredRoom(code) {
   awaitRoomTakeover(mirror);
   let connected = false;
   await new Promise(resolve => {
-    const timeout = setTimeout(() => {
+    mirror.entryResolve = resolve;
+    mirror.entryTimeout = setTimeout(() => {
       if (!connected && mirroredRoom === mirror) {
         closeMirroredRoom();
         setEntryLoading(false);
         feedback('房间暂时无法同步，请重试进入房间', true);
-        resolve();
       }
+      resolve();
     }, 6000);
     channel.onmessage = ({ data }) => {
       if (mirroredRoom !== mirror) return;
       if (data.type === 'snapshot' && data.view?.code === code) {
-        if (!connected) { connected = true; clearTimeout(timeout); resolve(); }
+        if (!connected) { connected = true; clearTimeout(mirror.entryTimeout); resolve(); }
         applyMirroredView(data.view);
       } else if (data.type === 'handoff' && data.code === code) {
         updateMirrorResources(mirror, data);
       } else if (data.type === 'pending' && data.code === code) {
         if (!connected) {
-          connected = true; clearTimeout(timeout); resolve();
+          connected = true; clearTimeout(mirror.entryTimeout); resolve();
           state.code = code; showRoom(true);
           $('room-name').textContent = code;
           feedback('正在同步房间信息…');
@@ -787,6 +792,7 @@ async function handleServer(msg) {
       trace('room.joined', { roomCode: state.code, id: state.id, token: state.token,
         generation: state.generation, peers: msg.peers, resumed: restored });
       rememberRoom(); showRoom(true); $('room-name').textContent = msg.code;
+      broadcastRoomHandoff();
       $('room-code-input').value = msg.code;
       if (state.ws && signalRecover) startSignalKeepalive(state.ws, signalRecover);
       // Resume may restore a server-side name from before the last local edit.
@@ -1406,8 +1412,10 @@ async function receiveChannel(peer, data) {
       const verified = await verifySha256(blob, msg.sha256);
       if (state.active !== job || job.cancelled) return;
       if (!verified) { failActive('文件 SHA-256 校验失败，已丢弃数据'); return; }
+      job.blob = blob;
       job.url = URL.createObjectURL(blob);
       job.chunks = [];
+      broadcastRoomHandoff();
       finishJob('校验通过，点击保存');
     } catch (err) {
       if (state.active === job) failActive(`文件校验失败：${err.message}`);
@@ -1804,6 +1812,7 @@ function shareFiles(files) {
   });
   state.outbound.set(offerId, fileMap);
   state.ownOffers.push({ offerId, files: metadata });
+  broadcastRoomHandoff();
   for (const peer of state.peers.values()) syncSharedOffers(peer);
   renderSentFiles();
   const ready = [...state.peers.values()].filter(peer => peer.ready).length;
@@ -1829,6 +1838,7 @@ function withdrawSharedFile(offerId, fileId) {
     state.ownOffers = state.ownOffers.filter(item => item !== offer);
     state.outbound.delete(offerId);
   }
+  broadcastRoomHandoff();
   renderSentFiles();
 }
 function withdrawPeerFile(peerId, offerId, fileId) {
