@@ -2441,15 +2441,15 @@ test('a surviving room tab claims transport ownership and retains staged files a
   const t = harness();
   t.run("window.ownerMessages = []");
   t.run(`mirroredRoom = {
-    code: '5832',
+    code: '5832', transportTabId:'departing-owner',
     session: {id:'same-member-id',token:'same-member-token'},
     sources: new Map([['share-1',new Map([['file-1',new Blob(['source'])]])]]),
     savedBlobs: new Map([['remote:offer-2:received',new Blob(['saved'])]]),
     savedUrls: new Map([['remote:offer-2:received','blob:mirror-saved']]),
     channel: {postMessage(message){window.ownerMessages.push(message)},close(){}},
     view: {
-      code:'5832', name:'Amber Fox',roomEntry:'resumed',
-      ownOffers:[{offerId:'share-1',files:[{id:'file-1',name:'local.bin',size:6}]}],
+      code:'5832', name:'Amber Fox',roomEntry:'resumed',transportTabId:'departing-owner',
+      ownOffers:[{offerId:'share-1',ownerTabId:'surviving-tab',files:[{id:'file-1',name:'local.bin',size:6}]}],
       jobs:[
         {peerId:'remote',offerId:'offer-2',fileId:'received',name:'saved.bin',size:5,
          received:5,status:'校验通过，点击保存',url:'blob:owner-saved'},
@@ -2478,14 +2478,15 @@ test('a surviving room tab claims transport ownership and retains staged files a
     {type:'enter',code:'5832',name:'Amber Fox',id:'same-member-id',token:'same-member-token'});
 });
 
-test('File handoff metadata remains authoritative if the owner exits before the UI snapshot', () => {
+test('surviving tab File handoff remains authoritative without a newer UI snapshot', () => {
   const t = harness();
   const initial = {
     code:'5832', name:'Amber Fox', connected:true, roomEntry:'created',
     peers:[], ownOffers:[], offers:[], jobs:[], diagnostics:{}, feedback:'', feedbackError:false,
   };
   t.run(`mirroredRoom = {
-    code:'5832', session:null, savedBlobs:new Map(), savedUrls:new Map(),
+    code:'5832', session:null, transportTabId:'departing-owner',
+    savedBlobs:new Map(), savedUrls:new Map(),
     sources:new Map(), channel:{postMessage(){},close(){}},
     view:null
   }`);
@@ -2494,7 +2495,7 @@ test('File handoff metadata remains authoritative if the owner exits before the 
   t.run(`updateMirrorResources(mirroredRoom, {
     code:'5832', session:{id:'member-id',token:'member-token'},
     sources:[{offerId:'share-a',files:[{fileId:'file-a',file:new Blob(['actual-bytes'])}]}],
-    ownOffers:[{offerId:'share-a',files:[{id:'file-a',name:'fast.bin',size:12}]}],
+    ownOffers:[{offerId:'share-a',ownerTabId:'surviving-tab',files:[{id:'file-a',name:'fast.bin',size:12}]}],
     saved:[],
   })`);
   assert.equal(t.state.ownOffers[0]?.files[0]?.name, 'fast.bin',
@@ -2509,4 +2510,51 @@ test('File handoff metadata remains authoritative if the owner exits before the 
   assert.equal(t.state.outbound.get('share-a')?.get('file-a')?.size, 12);
   assert.equal(t.state.id, 'member-id');
   assert.equal(t.FakeWebSocket.sockets.length, 1);
+});
+
+
+test('a tab leaving withdraws its own files without removing independent tabs shares', () => {
+  const t = harness();
+  t.run(`state.code='5832';
+    state.ownOffers=[
+      {offerId:'from-primary',ownerTabId:localRoomTabId,files:[{id:'a',name:'a.bin',size:4}]},
+      {offerId:'from-mirror',ownerTabId:'other-tab',files:[{id:'b',name:'b.bin',size:3}]},
+    ];
+    state.outbound=new Map([
+      ['from-primary',new Map([['a',new Blob(['aaaa'])]])],
+      ['from-mirror',new Map([['b',new Blob(['bbb'])]])],
+    ]);
+    withdrawTabShares(localRoomTabId);`);
+  assert.deepEqual([...t.state.ownOffers].map(x=>x.offerId), ['from-mirror']);
+  assert.deepEqual([...t.state.outbound.keys()], ['from-mirror']);
+  t.run("withdrawTabShares('other-tab')");
+  assert.equal(t.state.ownOffers.length, 0);
+  assert.equal(t.state.outbound.size, 0);
+});
+
+test('surviving tab takes over room but never inherits departed tabs source files', () => {
+  const t = harness();
+  t.run(`mirroredRoom = {
+    code:'5832',transportTabId:'tab-A',
+    session:{id:'member-1',token:'token-1'},
+    sources:new Map([
+      ['from-A',new Map([['A-file',new Blob(['owned by A'])]])],
+      ['from-B',new Map([['B-file',new Blob(['owned by B'])]])],
+      ['from-C',new Map([['C-file',new Blob(['owned by C'])]])],
+    ]),
+    savedBlobs:new Map(),savedUrls:new Map(),
+    channel:{postMessage(){},close(){}},
+    view:{
+      code:'5832',transportTabId:'tab-A',name:'Amber Fox',roomEntry:'resumed',
+      ownOffers:[
+        {offerId:'from-A',ownerTabId:'tab-A',files:[{id:'A-file',name:'a.bin',size:10}]},
+        {offerId:'from-B',ownerTabId:'tab-B',files:[{id:'B-file',name:'b.bin',size:10}]},
+        {offerId:'from-C',ownerTabId:'tab-C',files:[{id:'C-file',name:'c.bin',size:10}]},
+      ],jobs:[],
+    },
+  }`);
+  t.run("promoteMirroredRoom(mirroredRoom)");
+  assert.deepEqual([...t.state.ownOffers].map(o=>o.offerId), ['from-B','from-C']);
+  assert.deepEqual([...t.state.outbound.keys()], ['from-B','from-C']);
+  assert.equal(t.FakeWebSocket.sockets.length,1,'room transport reconnect remains enabled');
 });
