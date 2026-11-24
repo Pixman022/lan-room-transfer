@@ -2317,24 +2317,34 @@ function renderRoomFiles() {
     container.append(row);
   }
 
+  // Several batches from one real device are separate offers in the
+  // protocol, but belong under ONE device heading in the room UI.
+  const offersByPeer = new Map();
   for (const offer of offers) {
-    const peer = state.peers.get(offer.peerId);
+    if (!offersByPeer.has(offer.peerId)) offersByPeer.set(offer.peerId, []);
+    offersByPeer.get(offer.peerId).push(offer);
+  }
+  for (const [peerId, peerOffers] of offersByPeer) {
+    const peer = state.peers.get(peerId);
+    const entries = peerOffers.flatMap(offer =>
+      offer.files.map(file => ({ offer, file })));
     const group = elem('div', 'request');
     const top = elem('div', 'request-head');
     top.append(elem('strong', '', peer ? peerDisplayName(peer) : '已离线设备'),
-      elem('small', '', `${offer.files.length} 个文件`));
+      elem('small', '', `${entries.length} 个文件`));
     group.append(top);
-    for (const file of offer.files) {
+    for (const { offer, file } of entries) {
       const job = jobsByFile.get(`${offer.peerId}:${offer.offerId}:${file.id}`);
       if (job) shownJobs.add(job);
       appendFileRow(group, file, offer, job);
       count += 1;
     }
-    const pending = offer.files.filter(file => file.status === 'pending');
+    const pending = entries.filter(({ file }) => file.status === 'pending');
     if (pending.length) {
       const foot = elem('div', 'request-footer');
       const button = addButton(foot, `接收全部 (${pending.length})`,
-        () => pending.forEach(file => acceptFile(offer, file)), 'primary small-button');
+        () => pending.forEach(({ offer, file }) => acceptFile(offer, file)),
+        'primary small-button');
       button.disabled = mirrorActionsUnavailable() || !peer?.ready;
       group.append(foot);
     }
