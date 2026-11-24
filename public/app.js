@@ -116,6 +116,7 @@ let ownerRoomChannel = null;
 let mirroredRoom = null;
 let roomMirrorUpdateTimer = null;
 function roomChannelName(code) { return `lan-room-view:${code}`; }
+
 function closeOwnerRoomChannel() {
   if (!ownerRoomChannel) return;
   const owner = ownerRoomChannel;
@@ -123,7 +124,9 @@ function closeOwnerRoomChannel() {
   clearInterval(owner.heartbeat);
   if (roomMirrorUpdateTimer !== null) clearTimeout(roomMirrorUpdateTimer);
   roomMirrorUpdateTimer = null;
-  owner.channel.postMessage({ type: 'owner-left', code: owner.code });
+  // The current transport tab is leaving. Another live tab will acquire its
+  // Web Lock; this is NOT an instruction for the other tabs to leave.
+  owner.channel.postMessage({ type: 'owner-changing', code: owner.code });
   owner.channel.close();
 }
 function roomViewSnapshot() {
@@ -152,6 +155,25 @@ function roomViewSnapshot() {
     feedbackError: $('feedback').classList.contains('error'),
   };
 }
+function roomJobKey(job) {
+  return `${job.peerId}:${job.offerId}:${job.fileId}`;
+}
+// Share browser-local File/Blob handles separately from frequent status
+// snapshots. No bytes or credentials go to the signalling server.
+function broadcastRoomHandoff() {
+  if (!ownerRoomChannel || mirroredRoom || state.code !== ownerRoomChannel.code) return;
+  ownerRoomChannel.channel.postMessage({
+    type: 'handoff',
+    code: state.code,
+    session: state.id && state.token ? { id: state.id, token: state.token } : null,
+    sources: [...state.outbound].map(([offerId, files]) => ({
+      offerId, files: [...files].map(([fileId, file]) => ({ fileId, file })),
+    })),
+    saved: state.jobs.filter(job => job.blob && job.url).map(job => ({
+      key: roomJobKey(job), blob: job.blob,
+    })),
+  });
+}
 function broadcastRoomView() {
   if (!ownerRoomChannel || mirroredRoom || state.code !== ownerRoomChannel.code) return;
   ownerRoomChannel.channel.postMessage({ type: 'snapshot', view: roomViewSnapshot() });
@@ -175,23 +197,45 @@ function updateMirrorControls() {
 function sendMirrorAction(action) {
   if (!mirroredRoom) return;
   if (mirrorActionsUnavailable()) {
-    feedback('房间同步中断，请确认原标签页仍在运行后重试', true);
+    feedback('房间连接正在恢复，请稍后重试', true);
     return;
   }
   mirroredRoom.channel.postMessage({ type: 'action', action });
 }
+function updateMirrorResources(mirror, message) {
+  mirror.session = message.session || null;
+  mirror.sources = new Map((message.sources || []).map(offer => [
+    offer.offerId, new Map(offer.files.map(item => [item.fileId, item.file])),
+  ]));
+  for (const item of message.saved || []) {
+    if (!(item.blob instanceof Blob)) continue;
+    mirror.savedBlobs.set(item.key, item.blob);
+    if (!mirror.savedUrls.has(item.key)) {
+      mirror.savedUrls.set(item.key, URL.createObjectURL(item.blob));
+    }
+  }
+  if (mirror.view) {
+    for (const job of state.jobs) {
+      const url = mirror.savedUrls.get(roomJobKey(job));
+      if (url) job.url = url;
+    }
+    renderRoomFiles();
+  }
+}
 function applyMirroredView(view) {
   if (!mirroredRoom || view.code !== mirroredRoom.code) return;
-  mirroredRoom.view = view;
-  mirroredRoom.lastUpdate = Date.now();
-  mirroredRoom.stale = false;
+  const mirror = mirroredRoom;
+  mirror.view = view;
+  mirror.lastUpdate = Date.now();
+  mirror.stale = false;
   state.code = view.code;
   state.lastRoomEntry = view.roomEntry;
   state.generation = view.connected ? 'mirrored' : '';
   state.peers = new Map(view.peers.map(peer => [peer.id, peer]));
   state.ownOffers = view.ownOffers;
   state.offers = new Map(view.offers.map(offer => [`${offer.peerId}:${offer.offerId}`, offer]));
-  state.jobs = view.jobs.map(job => ({ ...job, chunks: [] }));
+  state.jobs = view.jobs.map(job => ({ ...job, chunks: [],
+    url: mirror.savedUrls.get(roomJobKey(job)) || job.url }));
   state.active = state.jobs.find(job => job.active) || null;
   state.queue = state.jobs.filter(job => job.queued);
   currentDeviceName = view.name;
@@ -210,10 +254,13 @@ function applyMirroredView(view) {
 }
 function closeMirroredRoom() {
   if (!mirroredRoom) return;
+  const mirror = mirroredRoom;
+  mirror.takeoverAbort?.abort();
+  clearInterval(mirror.watchdog);
+  mirror.channel.close();
+  for (const url of mirror.savedUrls.values()) URL.revokeObjectURL(url);
   try { sessionStorage.removeItem('lan-room-mirror-code'); }
   catch { /* Storage may be blocked. */ }
-  clearInterval(mirroredRoom.watchdog);
-  mirroredRoom.channel.close();
   $('qa-panel').hidden = !QA_MODE;
   $('qa-enable').hidden = QA_MODE;
   mirroredRoom = null;
@@ -225,54 +272,126 @@ function closeMirroredRoom() {
   renderPeers(); renderSentFiles(); renderRoomFiles();
   updateMirrorControls();
 }
+// Every follower queues for the room-specific Web Lock. The browser grants it
+// to exactly one surviving tab when the old controller leaves/closes.
+function awaitRoomTakeover(mirror) {
+  if (!navigator.locks?.request || !window.BroadcastChannel) return;
+  const abort = new AbortController();
+  mirror.takeoverAbort = abort;
+  navigator.locks.request(`lan-room:${mirror.code}`, { signal: abort.signal }, lock => {
+    if (!lock || mirroredRoom !== mirror) return;
+    return new Promise(release => {
+      roomTabLease = { code: mirror.code, release };
+      promoteMirroredRoom(mirror);
+    });
+  }).catch(error => {
+    if (error?.name !== 'AbortError') {
+      trace('room.tab.takeover.failed', { error: String(error) });
+      if (mirroredRoom === mirror) feedback('房间自动恢复失败，请重试进入房间', true);
+    }
+  });
+}
+function promoteMirroredRoom(mirror) {
+  if (mirroredRoom !== mirror || !mirror.view) {
+    // Without a previously received room snapshot, keep the known code and
+    // enter afresh instead of claiming stale file/session state.
+    mirror.view ??= { code: mirror.code, name: deviceName(),
+      roomEntry: null, ownOffers: [], offers: [], jobs: [] };
+  }
+  clearInterval(mirror.watchdog);
+  mirror.channel.close();
+  mirroredRoom = null;
+  const view = mirror.view;
+  state.code = mirror.code;
+  state.id = mirror.session?.id || '';
+  state.token = mirror.session?.token || '';
+  state.generation = '';
+  state.lastRoomEntry = view.roomEntry;
+  state.peers = new Map();
+  state.offers = new Map();
+  state.outbound = mirror.sources;
+  state.ownOffers = view.ownOffers.filter(offer => {
+    const files = mirror.sources.get(offer.offerId);
+    offer.files = offer.files.filter(file => files?.has(file.id));
+    return offer.files.length;
+  });
+  state.jobs = view.jobs.map(job => {
+    const key = roomJobKey(job);
+    const blob = mirror.savedBlobs.get(key);
+    const url = mirror.savedUrls.get(key) || null;
+    const interrupted = !url && (job.active || job.queued ||
+      job.status === '传输中' || job.status === '校验中' || Boolean(job.url));
+    return { ...job, blob: blob || null, url, chunks: [], active: false, queued: false,
+      received: interrupted ? 0 : job.received,
+      status: interrupted ? '失败：连接已切换，请重新接收' : job.status };
+  });
+  state.queue = [];
+  state.active = null;
+  state.leaving = false;
+  try { sessionStorage.removeItem('lan-room-mirror-code'); }
+  catch { /* Storage may be blocked. */ }
+  updateMirrorControls();
+  $('qa-panel').hidden = !QA_MODE;
+  $('qa-enable').hidden = QA_MODE;
+  showRoom(true);
+  $('room-name').textContent = mirror.code;
+  renderPeers(); renderSentFiles(); renderRoomFiles();
+  startOwnerRoomChannel(mirror.code);
+  feedback('正在恢复房间连接…');
+  connect({ type: 'enter', code: mirror.code, name: deviceName(),
+    ...(state.id && state.token ? { id: state.id, token: state.token } : {}) });
+}
 async function openMirroredRoom(code) {
   if (!window.BroadcastChannel) {
     setEntryLoading(false);
-    feedback('当前浏览器不支持房间页面同步，请使用原标签页', true);
+    feedback('当前浏览器不支持房间页面同步，请使用另一标签页', true);
     return;
   }
   const channel = new BroadcastChannel(roomChannelName(code));
   try { sessionStorage.setItem('lan-room-mirror-code', code); }
   catch { /* This tab can still mirror without stored room-code prefill. */ }
-  mirroredRoom = { code, channel, view: null, lastUpdate: Date.now(), stale: false,
-    watchdog: setInterval(() => {
-      if (!mirroredRoom || mirroredRoom.channel !== channel || !mirroredRoom.view ||
-          mirroredRoom.stale || Date.now() - mirroredRoom.lastUpdate < 30000) return;
-      mirroredRoom.stale = true;
-      mirroredRoom.view.connected = false;
-      state.generation = '';
-      renderPeers();
-      renderRoomFiles();
-      updateMirrorControls();
-      feedback('房间同步中断，请确认原标签页仍在运行', true);
-    }, 5000),
-  };
+  const mirror = { code, channel, view: null, session: null, sources: new Map(),
+    savedBlobs: new Map(), savedUrls: new Map(), lastUpdate: Date.now(),
+    stale: false, takeoverAbort: null, watchdog: null };
+  mirroredRoom = mirror;
+  mirror.watchdog = setInterval(() => {
+    if (mirroredRoom !== mirror || !mirror.view ||
+        mirror.stale || Date.now() - mirror.lastUpdate < 30000) return;
+    mirror.stale = true;
+    mirror.view.connected = false;
+    state.generation = '';
+    renderPeers(); renderRoomFiles(); updateMirrorControls();
+    feedback('正在恢复房间连接…');
+  }, 5000);
+  // Start lock waiting immediately, even before the first snapshot: this
+  // also covers the first tab closing during the second tab's entry.
+  awaitRoomTakeover(mirror);
   let connected = false;
   await new Promise(resolve => {
     const timeout = setTimeout(() => {
-      if (!connected) {
+      if (!connected && mirroredRoom === mirror) {
         closeMirroredRoom();
         setEntryLoading(false);
-        feedback('房间同步暂不可用，请刷新已打开的房间页面后重试', true);
+        feedback('房间暂时无法同步，请重试进入房间', true);
         resolve();
       }
     }, 6000);
     channel.onmessage = ({ data }) => {
-      if (!mirroredRoom || mirroredRoom.channel !== channel) return;
+      if (mirroredRoom !== mirror) return;
       if (data.type === 'snapshot' && data.view?.code === code) {
         if (!connected) { connected = true; clearTimeout(timeout); resolve(); }
         applyMirroredView(data.view);
+      } else if (data.type === 'handoff' && data.code === code) {
+        updateMirrorResources(mirror, data);
       } else if (data.type === 'pending' && data.code === code) {
         if (!connected) {
           connected = true; clearTimeout(timeout); resolve();
-          state.code = code;
-          showRoom(true);
+          state.code = code; showRoom(true);
           $('room-name').textContent = code;
           feedback('正在同步房间信息…');
         }
-      } else if (data.type === 'owner-left' && data.code === code) {
-        closeMirroredRoom();
-        feedback('房间已退出，可重新进入', false);
+      } else if (data.type === 'owner-changing' && data.code === code) {
+        feedback('正在恢复房间连接…');
       }
     };
     channel.postMessage({ type: 'hello' });
@@ -285,24 +404,12 @@ function handleMirroredAction(action) {
   const job = state.jobs.find(item => item.peerId === action.peerId &&
     item.offerId === action.offerId && item.fileId === action.fileId);
   switch (action.kind) {
-    case 'rename':
-      saveDeviceName(action.name);
-      break;
-    case 'share':
-      if (Array.isArray(action.files)) shareFiles(action.files);
-      break;
-    case 'withdraw':
-      withdrawSharedFile(action.offerId, action.fileId);
-      break;
-    case 'accept':
-      if (offer && file && state.peers.get(offer.peerId)?.ready) acceptFile(offer, file);
-      break;
-    case 'cancel':
-      if (job) cancelJob(job);
-      break;
-    case 'retry':
-      if (job) retryJob(job);
-      break;
+    case 'rename': saveDeviceName(action.name); break;
+    case 'share': if (Array.isArray(action.files)) shareFiles(action.files); break;
+    case 'withdraw': withdrawSharedFile(action.offerId, action.fileId); break;
+    case 'accept': if (offer && file && state.peers.get(offer.peerId)?.ready) acceptFile(offer, file); break;
+    case 'cancel': if (job) cancelJob(job); break;
+    case 'retry': if (job) retryJob(job); break;
   }
 }
 function startOwnerRoomChannel(code) {
@@ -312,8 +419,12 @@ function startOwnerRoomChannel(code) {
   ownerRoomChannel = { code, channel, heartbeat: setInterval(broadcastRoomView, 4000) };
   channel.onmessage = ({ data }) => {
     if (data?.type === 'hello') {
-      if (state.code === code) broadcastRoomView();
-      else channel.postMessage({ type: 'pending', code });
+      if (state.code === code) {
+        broadcastRoomView();
+        broadcastRoomHandoff();
+      } else {
+        channel.postMessage({ type: 'pending', code });
+      }
     } else if (data?.type === 'action') {
       handleMirroredAction(data.action);
     }
