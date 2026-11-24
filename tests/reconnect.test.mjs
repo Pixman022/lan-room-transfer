@@ -2362,3 +2362,30 @@ test('reused friendly names remain editable and show distinct peer labels', () =
   assert.equal(t.run('peerDisplayName(state.peers.get("member-11AA"))'), 'Amber Fox',
     'unique names never get an unnecessary suffix');
 });
+
+test('secondary room view mirrors member/file jobs and delegates receive without making a socket', () => {
+  const t = harness();
+  t.run("window.mirrorCommands = []; mirroredRoom = {code: '5832', channel: {postMessage(message){window.mirrorCommands.push(message)}, close(){}}}");
+  t.run(`applyMirroredView({
+    code: '5832', name: 'Amber Fox', connected: true, roomEntry: 'joined',
+    peers: [{id:'peer-b',name:'Phone',ready:true,reason:'文件直连就绪'}],
+    ownOffers: [{offerId:'my-share',files:[{id:'mine',name:'local.bin',size:9}]}],
+    offers: [{peerId:'peer-b',offerId:'offer-1',files:[
+      {id:'f1',name:'remote.bin',size:5,status:'pending'}]}],
+    jobs: [], diagnostics:{}, feedback:'同步完成', feedbackError:false
+  })`);
+  assert.equal(t.state.code, '5832');
+  assert.equal(t.state.peers.size, 1);
+  assert.equal(t.state.offers.size, 1);
+  assert.equal(t.state.ownOffers[0].files[0].name, 'local.bin');
+  assert.equal(t.elements.get('room-screen').hidden, false);
+  assert.equal(t.FakeWebSocket.sockets.length, 0);
+  assert.equal(t.elements.get('connection-status').textContent, '文件直连就绪');
+  t.run("acceptFile(state.offers.get('peer-b:offer-1'), state.offers.get('peer-b:offer-1').files[0])");
+  assert.equal(t.run('window.mirrorCommands.length'), 1);
+  assert.equal(t.run('window.mirrorCommands[0].action.kind'), 'accept');
+  assert.equal(t.state.jobs.length, 0, 'only the owning controller queues the real transfer');
+  t.run('closeMirroredRoom()');
+  assert.equal(t.elements.get('room-screen').hidden, true);
+  assert.equal(t.FakeWebSocket.sockets.length, 0);
+});

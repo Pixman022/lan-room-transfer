@@ -103,9 +103,203 @@ function acquireRoomTab(code) {
   });
 }
 function releaseRoomTab() {
+  closeOwnerRoomChannel();
   const lease = roomTabLease;
   roomTabLease = null;
   lease?.release();
+}
+
+// Browser-profile tabs share ONE WebSocket/P2P controller for each room.
+// Followers receive only room UI metadata over BroadcastChannel (never
+// credentials, SDP/ICE or cloud file bytes) and forward explicit UI actions.
+let ownerRoomChannel = null;
+let mirroredRoom = null;
+let roomMirrorUpdateTimer = null;
+function roomChannelName(code) { return `lan-room-view:${code}`; }
+function closeOwnerRoomChannel() {
+  if (!ownerRoomChannel) return;
+  const owner = ownerRoomChannel;
+  ownerRoomChannel = null;
+  clearInterval(owner.heartbeat);
+  if (roomMirrorUpdateTimer !== null) clearTimeout(roomMirrorUpdateTimer);
+  roomMirrorUpdateTimer = null;
+  owner.channel.postMessage({ type: 'owner-left', code: owner.code });
+  owner.channel.close();
+}
+function roomViewSnapshot() {
+  return {
+    code: state.code, name: deviceName(),
+    connected: state.ws?.readyState === WebSocket.OPEN && Boolean(state.generation),
+    roomEntry: state.lastRoomEntry,
+    peers: [...state.peers.values()].map(peer => ({
+      id: peer.id, name: peer.name, ready: peer.ready, reason: peer.reason,
+    })),
+    ownOffers: state.ownOffers.map(offer => ({
+      offerId: offer.offerId, files: offer.files.map(file => ({ ...file })),
+    })),
+    offers: [...state.offers.values()].map(offer => ({
+      peerId: offer.peerId, offerId: offer.offerId,
+      files: offer.files.map(file => ({ ...file })),
+    })),
+    jobs: state.jobs.map(job => ({
+      peerId: job.peerId, offerId: job.offerId, fileId: job.fileId,
+      name: job.name, size: job.size, received: job.received,
+      status: job.status, url: job.url || null, cancelled: job.cancelled,
+      active: state.active === job, queued: state.queue.includes(job),
+    })),
+    diagnostics: diagnosticsSnapshot(),
+    feedback: $('feedback').textContent,
+    feedbackError: $('feedback').classList.contains('error'),
+  };
+}
+function broadcastRoomView() {
+  if (!ownerRoomChannel || mirroredRoom || state.code !== ownerRoomChannel.code) return;
+  ownerRoomChannel.channel.postMessage({ type: 'snapshot', view: roomViewSnapshot() });
+}
+function scheduleRoomView() {
+  if (!ownerRoomChannel || mirroredRoom || roomMirrorUpdateTimer !== null) return;
+  roomMirrorUpdateTimer = setTimeout(() => {
+    roomMirrorUpdateTimer = null;
+    broadcastRoomView();
+  }, 120);
+}
+function sendMirrorAction(action) {
+  mirroredRoom?.channel.postMessage({ type: 'action', action });
+}
+function applyMirroredView(view) {
+  if (!mirroredRoom || view.code !== mirroredRoom.code) return;
+  mirroredRoom.view = view;
+  mirroredRoom.lastUpdate = Date.now();
+  mirroredRoom.stale = false;
+  state.code = view.code;
+  state.lastRoomEntry = view.roomEntry;
+  state.generation = view.connected ? 'mirrored' : '';
+  state.peers = new Map(view.peers.map(peer => [peer.id, peer]));
+  state.ownOffers = view.ownOffers;
+  state.offers = new Map(view.offers.map(offer => [`${offer.peerId}:${offer.offerId}`, offer]));
+  state.jobs = view.jobs.map(job => ({ ...job, chunks: [] }));
+  state.active = state.jobs.find(job => job.active) || null;
+  state.queue = state.jobs.filter(job => job.queued);
+  currentDeviceName = view.name;
+  if ($('my-device-label').contentEditable !== 'plaintext-only') updateDeviceAvatar();
+  $('room-name').textContent = view.code;
+  $('room-code-input').value = view.code;
+  showRoom(true);
+  renderPeers();
+  renderSentFiles();
+  renderRoomFiles();
+  renderDiagnostics();
+  $('qa-panel').hidden = true;
+  $('qa-enable').hidden = true;
+  feedback(view.feedback || '房间信息已同步', view.feedbackError);
+}
+function closeMirroredRoom() {
+  if (!mirroredRoom) return;
+  try { sessionStorage.removeItem('lan-room-mirror-code'); }
+  catch { /* Storage may be blocked. */ }
+  clearInterval(mirroredRoom.watchdog);
+  mirroredRoom.channel.close();
+  $('qa-panel').hidden = !QA_MODE;
+  $('qa-enable').hidden = QA_MODE;
+  mirroredRoom = null;
+  state.code = ''; state.generation = ''; state.lastRoomEntry = null;
+  state.id = ''; state.token = '';
+  state.peers.clear(); state.ownOffers = []; state.offers.clear();
+  state.jobs = []; state.queue = []; state.active = null;
+  showRoom(false);
+  renderPeers(); renderSentFiles(); renderRoomFiles();
+}
+async function openMirroredRoom(code) {
+  if (!window.BroadcastChannel) {
+    setEntryLoading(false);
+    feedback('当前浏览器不支持房间页面同步，请使用原标签页', true);
+    return;
+  }
+  const channel = new BroadcastChannel(roomChannelName(code));
+  try { sessionStorage.setItem('lan-room-mirror-code', code); }
+  catch { /* This tab can still mirror without stored room-code prefill. */ }
+  mirroredRoom = { code, channel, view: null, lastUpdate: Date.now(), stale: false,
+    watchdog: setInterval(() => {
+      if (!mirroredRoom || mirroredRoom.channel !== channel || !mirroredRoom.view ||
+          mirroredRoom.stale || Date.now() - mirroredRoom.lastUpdate < 30000) return;
+      mirroredRoom.stale = true;
+      mirroredRoom.view.connected = false;
+      state.generation = '';
+      updateConnectionSummary();
+      feedback('原房间页面暂时没有同步更新，请确认原标签页仍在运行', true);
+    }, 5000),
+  };
+  let connected = false;
+  await new Promise(resolve => {
+    const timeout = setTimeout(() => {
+      if (!connected) {
+        closeMirroredRoom();
+        setEntryLoading(false);
+        feedback('房间同步暂不可用，请刷新已打开的房间页面后重试', true);
+        resolve();
+      }
+    }, 6000);
+    channel.onmessage = ({ data }) => {
+      if (!mirroredRoom || mirroredRoom.channel !== channel) return;
+      if (data.type === 'snapshot' && data.view?.code === code) {
+        if (!connected) { connected = true; clearTimeout(timeout); resolve(); }
+        applyMirroredView(data.view);
+      } else if (data.type === 'pending' && data.code === code) {
+        if (!connected) {
+          connected = true; clearTimeout(timeout); resolve();
+          state.code = code;
+          showRoom(true);
+          $('room-name').textContent = code;
+          feedback('正在同步房间信息…');
+        }
+      } else if (data.type === 'owner-left' && data.code === code) {
+        closeMirroredRoom();
+        feedback('房间已退出，可重新进入', false);
+      }
+    };
+    channel.postMessage({ type: 'hello' });
+  });
+}
+function handleMirroredAction(action) {
+  if (!action || !ownerRoomChannel || !state.code || state.code !== ownerRoomChannel.code) return;
+  const offer = state.offers.get(`${action.peerId}:${action.offerId}`);
+  const file = offer?.files.find(item => item.id === action.fileId);
+  const job = state.jobs.find(item => item.peerId === action.peerId &&
+    item.offerId === action.offerId && item.fileId === action.fileId);
+  switch (action.kind) {
+    case 'rename':
+      saveDeviceName(action.name);
+      break;
+    case 'share':
+      if (Array.isArray(action.files)) shareFiles(action.files);
+      break;
+    case 'withdraw':
+      withdrawSharedFile(action.offerId, action.fileId);
+      break;
+    case 'accept':
+      if (offer && file && state.peers.get(offer.peerId)?.ready) acceptFile(offer, file);
+      break;
+    case 'cancel':
+      if (job) cancelJob(job);
+      break;
+    case 'retry':
+      if (job) retryJob(job);
+      break;
+  }
+}
+function startOwnerRoomChannel(code) {
+  if (!window.BroadcastChannel) return;
+  closeOwnerRoomChannel();
+  const channel = new BroadcastChannel(roomChannelName(code));
+  ownerRoomChannel = { code, channel, heartbeat: setInterval(broadcastRoomView, 4000) };
+  channel.onmessage = ({ data }) => {
+    if (data?.type === 'hello') {
+      if (state.code === code) broadcastRoomView();
+      else channel.postMessage({ type: 'pending', code });
+    } else if (data?.type === 'action') {
+      handleMirroredAction(data.action);
+    }
+  };
 }
 try { currentDeviceName = getOrCreateDeviceName(window.localStorage); }
 catch { currentDeviceName = generateDeviceName(); }
@@ -129,6 +323,7 @@ const humanSize = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576
 function feedback(text, error = false) {
   $('feedback').textContent = text;
   $('feedback').className = error ? 'feedback error' : 'feedback';
+  scheduleRoomView();
 }
 let toastTimer = null;
 function showToast(message) {
@@ -160,7 +355,8 @@ function updateConnectionSummary() {
     status.dataset.state = 'offline';
     return;
   }
-  if (state.ws?.readyState !== WebSocket.OPEN || !state.generation) {
+  if (!(mirroredRoom ? mirroredRoom.view?.connected : state.ws?.readyState === WebSocket.OPEN) ||
+      !state.generation) {
     status.textContent = '正在恢复连接';
     status.dataset.state = 'waiting';
     return;
@@ -226,7 +422,8 @@ function saveDeviceName(rawName) {
   if (changed) {
     try { window.localStorage.setItem(DEVICE_NAME_KEY, name); }
     catch { /* Private mode may deny storage. */ }
-    if (state.code && state.ws?.readyState === WebSocket.OPEN) {
+    if (mirroredRoom) sendMirrorAction({ kind: 'rename', name });
+    else if (state.code && state.ws?.readyState === WebSocket.OPEN) {
       debugSend(state.ws, { type: 'rename', name });
     }
     renderPeers();
@@ -1210,6 +1407,12 @@ async function startSendingFile(peer, request) {
 }
 
 function acceptFile(offer, file) {
+  if (mirroredRoom) {
+    if (file.status === 'pending') sendMirrorAction({
+      kind: 'accept', peerId: offer.peerId, offerId: offer.offerId, fileId: file.id,
+    });
+    return;
+  }
   if (file.status !== 'pending') return;
   file.status = 'queued';
   const job = { peerId: offer.peerId, offerId: offer.offerId, fileId: file.id,
@@ -1255,6 +1458,10 @@ function finishJob(status) {
 }
 function failActive(reason) { if (state.active) finishJob(`失败：${reason}`); }
 function cancelJob(job) {
+  if (mirroredRoom) {
+    sendMirrorAction({ kind: 'cancel', peerId: job.peerId, offerId: job.offerId, fileId: job.fileId });
+    return;
+  }
   if (state.active === job) {
     if (job.cancelled) return;
     job.cancelled = true;
@@ -1277,6 +1484,10 @@ function cancelJob(job) {
   }
 }
 function retryJob(job) {
+  if (mirroredRoom) {
+    sendMirrorAction({ kind: 'retry', peerId: job.peerId, offerId: job.offerId, fileId: job.fileId });
+    return;
+  }
   if (!job.status.startsWith('失败') && job.status !== '已取消') return;
   const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
   const file = offer?.files.find(f => f.id === job.fileId);
@@ -1435,6 +1646,10 @@ function syncSharedOffers(peer) {
   }
 }
 function shareFiles(files) {
+  if (mirroredRoom) {
+    if (files.length) sendMirrorAction({ kind: 'share', files });
+    return;
+  }
   if (!state.code) { feedback('请先进入房间', true); return; }
   if (!files.length || files.length > MAX_FILES) { feedback('一次请选择 1–20 个文件', true); return; }
   if (files.some(file => !Number.isSafeInteger(file.size) || file.size < 0)) {
@@ -1459,6 +1674,10 @@ function shareFiles(files) {
     : ready ? '文件已加入房间共享列表' : '文件已添加，等待设备直连');
 }
 function withdrawSharedFile(offerId, fileId) {
+  if (mirroredRoom) {
+    sendMirrorAction({ kind: 'withdraw', offerId, fileId });
+    return;
+  }
   const offer = state.ownOffers.find(item => item.offerId === offerId);
   if (!offer || !offer.files.some(file => file.id === fileId)) return;
   offer.files = offer.files.filter(file => file.id !== fileId);
@@ -1504,6 +1723,7 @@ function peerDisplayName(peer) {
   return sameName > 1 ? `${peer.name} · ${peer.id.slice(-4)}` : peer.name;
 }
 function renderPeers() {
+  scheduleRoomView();
   const list = $('peer-list');
   list.replaceChildren();
   const peers = [...state.peers.values()];
@@ -1523,6 +1743,7 @@ function renderPeers() {
   qaRender();
 }
 function diagnosticsSnapshot() {
+  if (mirroredRoom?.view?.diagnostics) return mirroredRoom.view.diagnostics;
   return {
     signal: state.ws?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
     signalErrors: state.signalErrors,
@@ -1682,6 +1903,7 @@ function diagnoseIce(peer, stats) {
 // Full evidence is intentionally opt-in. Normal copy diagnostics remain redacted.
 async function buildDiagnosticsReport() {
   const summary = diagnosticsSnapshot();
+  if (mirroredRoom) return summary;
   if (!FULL_DEBUG) {
     // Include ICE evidence without exposing raw SDP, IP addresses or room credentials.
     const peers = await Promise.all([...state.peers.values()].map(async (peer, index) => {
@@ -1752,6 +1974,7 @@ async function buildDiagnosticsReport() {
   };
 }
 function renderDiagnostics() {
+  scheduleRoomView();
   const panel = $('diagnostics-panel');
   if (panel.hidden) return;
   const data = diagnosticsSnapshot();
@@ -1805,6 +2028,7 @@ $('copy-diagnostics').addEventListener('click', async () => {
   }
 });
 function renderSentFiles() {
+  scheduleRoomView();
   const container = $('sent-files');
   container.replaceChildren();
   const shared = state.ownOffers.flatMap(offer => offer.files.map(file => ({ ...file, offerId: offer.offerId })));
@@ -1821,6 +2045,7 @@ function renderSentFiles() {
   }
 }
 function renderRoomFiles() {
+  scheduleRoomView();
   const root = $('incoming-requests');
   root.replaceChildren();
   const offers = [...state.offers.values()];
@@ -1968,8 +2193,13 @@ async function suggestCode() {
   } catch { /* Keep the locally generated four-digit fallback. */ }
 }
 const priorSession = remembered();
+let priorMirrorCode = null;
+try { priorMirrorCode = sessionStorage.getItem('lan-room-mirror-code'); }
+catch { /* Storage may be blocked. */ }
 if (priorSession?.code && /^[A-Z0-9]{4,16}$/.test(priorSession.code)) {
   codeInput.value = priorSession.code;
+} else if (priorMirrorCode && /^[A-Z0-9]{4,16}$/.test(priorMirrorCode)) {
+  codeInput.value = priorMirrorCode;
 } else {
   codeInput.value = generateRandomRoomCode();
   suggestCode();
@@ -1987,10 +2217,10 @@ $('enter-room').onclick = async () => {
     const code = normalizeRoomCode(codeInput.value);
     setEntryLoading(true);
     if (!await acquireRoomTab(code)) {
-      setEntryLoading(false);
-      feedback('此房间已在当前浏览器的其他标签页打开，请返回原页面使用', true);
+      await openMirroredRoom(code);
       return;
     }
+    startOwnerRoomChannel(code);
     const action = { type: 'enter', code, name: deviceName() };
     const session = remembered();
     if (session?.code === code) { action.id = session.id; action.token = session.token; }
@@ -2002,6 +2232,11 @@ $('enter-room').onclick = async () => {
   }
 };
 $('leave-room').onclick = () => {
+  if (mirroredRoom) {
+    closeMirroredRoom();
+    feedback('已关闭此房间视图，其他标签页仍保持连接');
+    return;
+  }
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
   state.leaving = true;
   stopReconnect();
