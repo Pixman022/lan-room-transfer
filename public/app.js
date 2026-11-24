@@ -425,8 +425,10 @@ function startOwnerRoomChannel(code) {
   channel.onmessage = ({ data }) => {
     if (data?.type === 'hello') {
       if (state.code === code) {
-        broadcastRoomView();
+        // A tab becomes visibly joined only after its takeover credentials
+        // and local File handles have been enqueued first on this channel.
         broadcastRoomHandoff();
+        broadcastRoomView();
       } else {
         channel.postMessage({ type: 'pending', code });
       }
