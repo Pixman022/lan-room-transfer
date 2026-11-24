@@ -192,9 +192,18 @@ window.__smokeMirrorFileData = async () => {
     a.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert a.locator('#peer-list strong').inner_text() == 'Mobile Phone'
 
-    # Leaving a mirror is tab-local and must not disconnect the owner or B.
+    # Closing a follower's view withdraws its own shares, but must not
+    # disconnect the room or withdraw another tab's source files.
+    with duplicate.expect_file_chooser() as local_chooser:
+        duplicate.locator('#drop-zone').click()
+    local_chooser.value.set_files({
+        'name':'mirror-exit.txt', 'mimeType':'text/plain', 'buffer':b'local-follower',
+    })
+    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
     duplicate.locator('#leave-room').click()
     duplicate.locator('#home-screen').wait_for(state='visible')
+    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for(state='detached')
+    a.locator('#sent-files').get_by_text('smoke.txt').wait_for()
     assert a.locator('#room-screen').is_visible()
     assert b.locator('#room-screen').is_visible()
     assert a.evaluate('window.__smokeWebSockets.length') == 1
