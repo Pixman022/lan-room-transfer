@@ -159,6 +159,7 @@ function roomViewSnapshot() {
       name: job.name, size: job.size, received: job.received,
       status: job.status, url: job.url || null, cancelled: job.cancelled,
       active: state.active === job, queued: state.queue.includes(job),
+      recovering: job.recovering === true,
     })),
     diagnostics: diagnosticsSnapshot(),
     feedback: $('feedback').textContent,
@@ -369,11 +370,14 @@ function promoteMirroredRoom(mirror) {
     const key = roomJobKey(job);
     const blob = mirror.savedBlobs.get(key);
     const url = mirror.savedUrls.get(key) || null;
-    const interrupted = !url && (job.active || job.queued ||
-      job.status === '传输中' || job.status === '校验中' || Boolean(job.url));
+    const recovering = !url && !job.cancelled && (job.active || job.queued ||
+      job.recovering || job.status === '传输中' || job.status === '校验中');
+    const missingSavedFile = !url && Boolean(job.url);
     return { ...job, blob: blob || null, url, chunks: [], active: false, queued: false,
-      received: interrupted ? 0 : job.received,
-      status: interrupted ? '失败：连接已切换，请重新接收' : job.status };
+      recovering: Boolean(recovering),
+      received: recovering ? 0 : job.received,
+      status: recovering ? '等待连接恢复后重新接收' :
+        missingSavedFile ? '失败：原下载数据不可用' : job.status };
   });
   state.queue = [];
   state.active = null;
@@ -1418,8 +1422,14 @@ async function receiveChannel(peer, data) {
           f.name.length > 255 || !Number.isSafeInteger(f.size) || f.size < 0)) return;
     const key = `${peer.id}:${msg.offerId}`;
     if (state.offers.has(key)) return;
-    state.offers.set(key, { peerId: peer.id, offerId: msg.offerId,
-      files: msg.files.map(f => ({ id: f.id, name: f.name, size: f.size, status: 'pending' })) });
+    const offer = { peerId: peer.id, offerId: msg.offerId,
+      files: msg.files.map(f => ({ id: f.id, name: f.name, size: f.size, status: 'pending' })) };
+    state.offers.set(key, offer);
+    // Closing the previous transport tab loses its active DataChannel. Once
+    // the new controller has re-established a verified P2P channel and the
+    // original source reannounces its offer, restart pending transfers from
+    // byte zero. Never pretend to resume a partial browser buffer.
+    restartHandoffReceives(offer);
     renderRoomFiles();
     feedback(`${peerDisplayName(peer)} 分享了 ${msg.files.length} 个文件`);
   } else if (msg.kind === 'file-withdraw') {
@@ -1608,6 +1618,34 @@ async function startSendingFile(peer, request) {
   }
 }
 
+function restartHandoffReceives(offer) {
+  const peer = state.peers.get(offer.peerId);
+  if (!peer?.ready) return;
+  let restored = 0;
+  for (const job of state.jobs) {
+    if (!job.recovering || job.cancelled || job.url ||
+        job.offerId !== offer.offerId) continue;
+    // File IDs are random per offer; also compare metadata so a new,
+    // unrelated file can never silently replace the intended download.
+    const file = offer.files.find(item => item.id === job.fileId &&
+      item.name === job.name && item.size === job.size);
+    if (!file || file.status !== 'pending') continue;
+    job.peerId = offer.peerId;
+    job.received = 0;
+    job.chunks = [];
+    job.cancelled = false;
+    job.recovering = false;
+    job.status = '排队中';
+    file.status = 'queued';
+    state.queue.push(job);
+    restored += 1;
+  }
+  if (restored) {
+    feedback(`连接已恢复，正在重新接收 ${restored} 个未完成文件`);
+    renderRoomFiles();
+    startNext();
+  }
+}
 function acceptFile(offer, file) {
   if (mirroredRoom) {
     if (file.status === 'pending') sendMirrorAction({
@@ -1662,6 +1700,12 @@ function failActive(reason) { if (state.active) finishJob(`失败：${reason}`);
 function cancelJob(job) {
   if (mirroredRoom) {
     sendMirrorAction({ kind: 'cancel', peerId: job.peerId, offerId: job.offerId, fileId: job.fileId });
+    return;
+  }
+  if (job.recovering) {
+    job.recovering = false;
+    job.status = '已取消';
+    renderRoomFiles();
     return;
   }
   if (state.active === job) {
@@ -2301,7 +2345,7 @@ function renderRoomFiles() {
       link.href = job.url;
       link.download = job.name;
       actions.append(link);
-    } else if (job && (state.active === job || state.queue.includes(job))) {
+    } else if (job && (job.recovering || state.active === job || state.queue.includes(job))) {
       if (!job.cancelled) {
         const button = addButton(actions, '取消', () => cancelJob(job), 'secondary small-button');
         button.disabled = mirrorActionsUnavailable();
