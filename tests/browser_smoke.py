@@ -212,14 +212,50 @@ with sync_playwright() as playwright:
     assert not errors, errors
     a.locator('#leave-room').click()
     a.locator('#home-screen').wait_for(state='visible')
-    # Leaving the primary room also closes its shared room views. A second
-    # tab can then become the primary member without refreshing.
-    duplicate.locator('#home-screen').wait_for(state='visible')
-    duplicate.locator('#enter-room').click()
-    duplicate.locator('#room-screen').wait_for(state='visible')
+    # The owner may leave without ejecting its other same-room tabs. The
+    # surviving tab automatically takes the exclusive lock, reconnects with
+    # the same room code and keeps its shared File object available.
+    duplicate.wait_for_function("""() =>
+        window.__smokeWebSockets.length === 1 &&
+        window.__smokeWebSockets[0].readyState === WebSocket.OPEN &&
+        document.getElementById('room-screen').hidden === false
+    """, timeout=15000)
     assert duplicate.locator('#room-name').inner_text() == 'HOME2026'
-    assert duplicate.evaluate('window.__smokeWebSockets.length') == 1
+    assert 'smoke.txt' in duplicate.locator('#sent-files').inner_text()
+    assert duplicate.locator('#connection-status').inner_text() == '房间已连接'
     duplicate.locator('#leave-room').click()
+    duplicate.locator('#home-screen').wait_for(state='visible')
+
+    # Abruptly closing the transport-holding tab must also trigger automatic
+    # election, without requiring a click/refresh in its surviving tab.
+    abrupt = one.new_page()
+    abrupt.goto(ROOT)
+    abrupt.locator('#room-code-input').fill('ABRUPT26')
+    abrupt.locator('#enter-room').click()
+    abrupt.locator('#room-screen').wait_for(state='visible')
+    with abrupt.expect_file_chooser() as abrupt_chooser:
+        abrupt.locator('#drop-zone').click()
+    abrupt_chooser.value.set_files({
+        'name': 'survive-owner-close.bin', 'mimeType': 'application/octet-stream',
+        'buffer': b'test-handoff-bytes',
+    })
+    survivor = one.new_page()
+    survivor.goto(ROOT)
+    survivor.locator('#room-code-input').fill('ABRUPT26')
+    survivor.locator('#enter-room').click()
+    survivor.locator('#room-screen').wait_for(state='visible')
+    survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
+    assert survivor.evaluate('window.__smokeWebSockets.length') == 0
+    abrupt.close()
+    survivor.wait_for_function("""() =>
+        window.__smokeWebSockets.length === 1 &&
+        window.__smokeWebSockets[0].readyState === WebSocket.OPEN &&
+        document.getElementById('room-screen').hidden === false
+    """, timeout=15000)
+    assert survivor.locator('#room-name').inner_text() == 'ABRUPT26'
+    assert survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').is_visible()
+    assert '房间同步中断' not in survivor.locator('#feedback').inner_text()
+    survivor.locator('#leave-room').click()
     browser.close()
-    print('PASS: shared same-profile room view, mirrored share/withdraw/rename, duplicate names, R05/R06 recovery')
+    print('PASS: same-room automatic owner-tab election, staged File retention, mirror controls, R05/R06')
     print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
