@@ -2477,3 +2477,36 @@ test('a surviving room tab claims transport ownership and retains staged files a
   assert.deepEqual({...t.FakeWebSocket.sockets[0].sent[0]},
     {type:'enter',code:'5832',name:'Amber Fox',id:'same-member-id',token:'same-member-token'});
 });
+
+test('File handoff metadata remains authoritative if the owner exits before the UI snapshot', () => {
+  const t = harness();
+  const initial = {
+    code:'5832', name:'Amber Fox', connected:true, roomEntry:'created',
+    peers:[], ownOffers:[], offers:[], jobs:[], diagnostics:{}, feedback:'', feedbackError:false,
+  };
+  t.run(`mirroredRoom = {
+    code:'5832', session:null, savedBlobs:new Map(), savedUrls:new Map(),
+    sources:new Map(), channel:{postMessage(){},close(){}},
+    view:null
+  }`);
+  t.run('applyMirroredView(' + JSON.stringify(initial) + ')');
+  assert.equal(t.state.ownOffers.length, 0);
+  t.run(`updateMirrorResources(mirroredRoom, {
+    code:'5832', session:{id:'member-id',token:'member-token'},
+    sources:[{offerId:'share-a',files:[{fileId:'file-a',file:new Blob(['actual-bytes'])}]}],
+    ownOffers:[{offerId:'share-a',files:[{id:'file-a',name:'fast.bin',size:12}]}],
+    saved:[],
+  })`);
+  assert.equal(t.state.ownOffers[0]?.files[0]?.name, 'fast.bin',
+    'share metadata must arrive with File handle even before throttled UI update');
+  assert.equal(t.state.outbound.size, 0, 'follower must not run a second P2P sender yet');
+  t.run('applyMirroredView(' + JSON.stringify(initial) + ')');
+  assert.equal(t.state.ownOffers[0]?.files[0]?.name, 'fast.bin',
+    'a late old UI snapshot must not erase a newer source handoff');
+  t.run('promoteMirroredRoom(mirroredRoom)');
+  assert.equal(t.state.ownOffers[0]?.files[0]?.name, 'fast.bin',
+    'promoted owner retains file even without a subsequent UI snapshot');
+  assert.equal(t.state.outbound.get('share-a')?.get('file-a')?.size, 12);
+  assert.equal(t.state.id, 'member-id');
+  assert.equal(t.FakeWebSocket.sockets.length, 1);
+});
