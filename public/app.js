@@ -84,6 +84,29 @@ const state = {
 };
 
 let currentDeviceName;
+// A room belongs to one active tab per browser profile/origin. Hold the lock
+// across WebSocket reconnects; never use a display name or IP as identity.
+let roomTabLease = null;
+function acquireRoomTab(code) {
+  if (roomTabLease?.code === code || !navigator.locks?.request) return Promise.resolve(true);
+  return new Promise(resolve => {
+    navigator.locks.request(`lan-room:${code}`, { ifAvailable: true }, lock => {
+      if (!lock) { resolve(false); return; }
+      return new Promise(release => {
+        roomTabLease = { code, release };
+        resolve(true);
+      });
+    }).catch(error => {
+      trace('room.tab.lock.failed', { error: String(error) });
+      resolve(false);
+    });
+  });
+}
+function releaseRoomTab() {
+  const lease = roomTabLease;
+  roomTabLease = null;
+  lease?.release();
+}
 try { currentDeviceName = getOrCreateDeviceName(window.localStorage); }
 catch { currentDeviceName = generateDeviceName(); }
 
@@ -206,6 +229,8 @@ function saveDeviceName(rawName) {
     if (state.code && state.ws?.readyState === WebSocket.OPEN) {
       debugSend(state.ws, { type: 'rename', name });
     }
+    renderPeers();
+    renderRoomFiles();
   }
   return name;
 }
@@ -359,6 +384,7 @@ function connect(action) {
       showRoom(wasJoined);
       scheduleReconnect(action);
     } else {
+      releaseRoomTab();
       showRoom(false);
       state.code = ''; state.ownOffers = []; state.outbound.clear();
     }
@@ -998,7 +1024,7 @@ async function receiveChannel(peer, data) {
     state.offers.set(key, { peerId: peer.id, offerId: msg.offerId,
       files: msg.files.map(f => ({ id: f.id, name: f.name, size: f.size, status: 'pending' })) });
     renderRoomFiles();
-    feedback(`${peer.name} 分享了 ${msg.files.length} 个文件`);
+    feedback(`${peerDisplayName(peer)} 分享了 ${msg.files.length} 个文件`);
   } else if (msg.kind === 'file-withdraw') {
     if (typeof msg.offerId === 'string' && typeof msg.fileId === 'string') {
       withdrawPeerFile(peer.id, msg.offerId, msg.fileId);
@@ -1296,7 +1322,7 @@ function qaRender() {
   const choices = qaFileChoices();
   select.replaceChildren();
   for (const item of choices) {
-    const option = elem('option', '', `${item.peer.name} · ${item.file.name} (${humanSize(item.file.size)})`);
+    const option = elem('option', '', `${peerDisplayName(item.peer)} · ${item.file.name} (${humanSize(item.file.size)})`);
     option.value = item.key;
     select.append(option);
   }
@@ -1470,6 +1496,13 @@ function discardPeerOffers(peerId) {
   for (const job of state.queue.filter(job => job.peerId === peerId)) job.status = '发送设备已离线';
   state.queue = state.queue.filter(job => job.peerId !== peerId);
 }
+function peerDisplayName(peer) {
+  const sameName = (deviceName() === peer.name ? 1 : 0) +
+    [...state.peers.values()].filter(other => other.name === peer.name).length;
+  // Names are editable labels, not unique IDs. Use a short, stable session
+  // discriminator only when the same name is shown more than once.
+  return sameName > 1 ? `${peer.name} · ${peer.id.slice(-4)}` : peer.name;
+}
 function renderPeers() {
   const list = $('peer-list');
   list.replaceChildren();
@@ -1480,7 +1513,7 @@ function renderPeers() {
     const row = elem('div', 'device-row');
     row.append(elem('div', 'device-icon', deviceAvatar(peer.name)));
     const info = elem('div', 'item-info');
-    info.append(elem('strong', '', peer.name), elem('span', '', peer.ready ? '已连接' : peer.reason));
+    info.append(elem('strong', '', peerDisplayName(peer)), elem('span', '', peer.ready ? '已连接' : peer.reason));
     row.append(info);
     list.append(row);
   }
@@ -1840,7 +1873,7 @@ function renderRoomFiles() {
     const peer = state.peers.get(offer.peerId);
     const group = elem('div', 'request');
     const top = elem('div', 'request-head');
-    top.append(elem('strong', '', peer?.name ?? '已离线设备'),
+    top.append(elem('strong', '', peer ? peerDisplayName(peer) : '已离线设备'),
       elem('small', '', `${offer.files.length} 个文件`));
     group.append(top);
     for (const file of offer.files) {
@@ -1948,16 +1981,22 @@ $('regenerate-code').onclick = () => {
 codeInput.oninput = event => {
   event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
 };
-$('enter-room').onclick = () => {
+$('enter-room').onclick = async () => {
   if ($('enter-room').disabled) return;
   try {
     const code = normalizeRoomCode(codeInput.value);
-    const name = deviceName();
-    const action = { type: 'enter', code, name };
+    setEntryLoading(true);
+    if (!await acquireRoomTab(code)) {
+      setEntryLoading(false);
+      feedback('此房间已在当前浏览器的其他标签页打开，请返回原页面使用', true);
+      return;
+    }
+    const action = { type: 'enter', code, name: deviceName() };
     const session = remembered();
     if (session?.code === code) { action.id = session.id; action.token = session.token; }
     connect(action);
   } catch (e) {
+    releaseRoomTab();
     setEntryLoading(false);
     feedback(e.message, true);
   }
@@ -1975,6 +2014,7 @@ $('leave-room').onclick = () => {
   state.jobs = []; state.queue = []; state.active = null; state.offers.clear(); state.outbound.clear();
   state.ownOffers = [];
   state.ws?.close(); state.ws = null;
+  releaseRoomTab();
   for (const peer of state.peers.values()) { clearTimeout(peer.connectTimer); peer.pc.close(); }
   state.peers.clear();
   state.code = ''; state.generation = ''; state.lastRoomEntry = null;
