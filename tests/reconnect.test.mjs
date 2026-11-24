@@ -2468,8 +2468,9 @@ test('a surviving room tab claims transport ownership and retains staged files a
   assert.equal(t.state.jobs[0].url, 'blob:mirror-saved',
     'a saved download can continue using a URL owned by the surviving tab');
   assert.equal(t.state.jobs[0].blob.size, 5);
-  assert.equal(t.state.jobs[1].status, '失败：连接已切换，请重新接收',
-    'no false resumable byte-progress guarantee');
+  assert.equal(t.state.jobs[1].status, '等待连接恢复后重新接收',
+    'the interrupted job waits for an exact source offer before starting over');
+  assert.equal(t.state.jobs[1].recovering, true);
   assert.equal(t.state.queue.length, 0);
   assert.equal(t.state.active, null);
   assert.equal(t.FakeWebSocket.sockets.length, 1, 'one new socket takes over the room');
@@ -2616,4 +2617,71 @@ test('closing a mirrored view never sets the deliberate room-exit marker', () =>
   assert.equal(t.run("window.events.filter(x => x.type === 'tab-left').length"), 1);
   assert.equal(t.run("window.events.filter(x => x.type === 'leave-all').length"), 0);
   assert.equal(t.run("readRoomExitRevision('5832')"), '');
+});
+
+test('receiver tab takeover restarts active and queued files only when original source returns', async () => {
+  const t = harness();
+  t.run("mirroredRoom={code:'5832', transportTabId:'departed-tab', session:{id:'receiver',token:'token'},sources:new Map(),savedBlobs:new Map(),savedUrls:new Map(),channel:{postMessage(){},close(){}},view:{code:'5832',name:'Amber Fox',roomEntry:'resumed',ownOffers:[],jobs:[{peerId:'old-sender',offerId:'offer-a',fileId:'f1',name:'first.bin',size:9,received:5,status:'传输中',active:true,queued:false,cancelled:false,url:null},{peerId:'old-sender',offerId:'offer-b',fileId:'f2',name:'second.bin',size:3,received:0,status:'排队中',active:false,queued:true,cancelled:false,url:null},{peerId:'old-sender',offerId:'offer-c',fileId:'f3',name:'cancelled.bin',size:4,received:0,status:'已取消',active:false,queued:false,cancelled:true,url:null}]}}");
+  t.run('promoteMirroredRoom(mirroredRoom)');
+  assert.equal(t.state.jobs[0].status,'等待连接恢复后重新接收');
+  assert.equal(t.state.jobs[0].received,0,'partial bytes are dropped');
+  assert.equal(t.state.jobs[1].recovering,true);
+  assert.equal(t.state.jobs[2].recovering,false,'user cancellation must be respected');
+  assert.equal(t.state.active,null);
+  assert.equal(t.state.queue.length,0);
+  assert.equal(t.FakeWebSocket.sockets.length,1,'only one new transport owner');
+  t.run("window.sent=[]; state.peers.set('sender-new',{id:'sender-new',name:'Phone',ready:true,reason:'文件直连就绪',channel:{readyState:'open',send(message){window.sent.push(JSON.parse(message))}},pc:{connectionState:'connected',iceConnectionState:'connected',close(){}}})");
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-wrong',files:[{id:'f1',name:'first.bin',size:9}]}))");
+  assert.equal(t.state.jobs[0].recovering,true,'different offer never restarts the download');
+  assert.equal(t.run('window.sent.length'),0);
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-a',files:[{id:'f1',name:'first.bin',size:9}]}))");
+  assert.equal(t.state.jobs[0].recovering,false);
+  assert.equal(t.state.jobs[0].peerId,'sender-new');
+  assert.equal(t.state.jobs[0].status,'等待发送端');
+  assert.equal(t.state.jobs[0].received,0);
+  assert.equal(t.run('window.sent.filter(x=>x.kind==="request-file").length'),1);
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-b',files:[{id:'f2',name:'second.bin',size:3}]}))");
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-c',files:[{id:'f3',name:'cancelled.bin',size:4}]}))");
+  assert.equal(t.state.jobs[1].recovering,false);
+  assert.equal(t.state.jobs[1].status,'排队中','second file remains in sequential queue');
+  assert.equal(t.state.queue.length,1);
+  assert.equal(t.state.jobs[2].status,'已取消');
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-a',files:[{id:'f1',name:'first.bin',size:9}]}))");
+  assert.equal(t.run('window.sent.filter(x=>x.kind==="request-file").length'),1,
+    'a duplicate catalog never triggers a second download');
+});
+
+test('a canceled automatic takeover receive must not start after its source reappears', async () => {
+  const t = harness();
+  t.run("state.code='5832';state.jobs=[{peerId:'sender',offerId:'offer-a',fileId:'f1',name:'file.bin',size:4,status:'等待连接恢复后重新接收',received:0,chunks:[],cancelled:false,recovering:true,url:null}];cancelJob(state.jobs[0])");
+  assert.equal(t.state.jobs[0].status,'已取消');
+  assert.equal(t.state.jobs[0].recovering,false);
+  t.run("window.sent=[];state.peers.set('sender',{id:'sender',name:'Peer',ready:true,channel:{readyState:'open',send(message){window.sent.push(JSON.parse(message))}}})");
+  await t.run("receiveChannel(state.peers.get('sender'),JSON.stringify({kind:'file-list',offerId:'offer-a',files:[{id:'f1',name:'file.bin',size:4}]}))");
+  assert.equal(t.state.jobs[0].status,'已取消');
+  assert.equal(t.run('window.sent.length'),0);
+});
+
+
+test('recovery re-request streams and verifies full file bytes over the existing P2P controller', async () => {
+  const t = await linkedFilePeers({realChecksum:true});
+  const bytes = new Blob(['hello']);
+  t.sender.state.outbound.set('resumed-offer',new Map([['resumed-file',bytes]]));
+  t.sender.state.ownOffers.push({offerId:'resumed-offer',
+    files:[{id:'resumed-file',name:'resume-test.bin',size:bytes.size}]});
+  t.receiver.state.jobs.push({
+    peerId:'sender',offerId:'resumed-offer',fileId:'resumed-file',
+    name:'resume-test.bin',size:bytes.size,received:0,chunks:[],
+    status:'等待连接恢复后重新接收',cancelled:false,recovering:true,url:null,
+  });
+  t.sender.run('syncSharedOffers(state.peers.get("receiver"))');
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存',4000);
+  assert.equal(t.receiver.state.jobs[0].received,bytes.size);
+  assert.equal(t.receiver.state.jobs[0].recovering,false);
+  assert.equal(t.receiver.state.jobs.length,1,'restart reuses the original job');
+  assert.equal(t.receiver.savedBlobs.length,1,'successful re-receive creates a single verified Save Blob');
+  assert.equal(await t.receiver.savedBlobs[0].text(),'hello');
+  assert.equal(t.receiver.state.jobs[0].url,'blob:test-file');
+  assert.equal(t.receiver.state.queue.length,0);
+  assert.equal(t.receiver.state.active,null);
 });

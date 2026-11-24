@@ -304,6 +304,60 @@ with sync_playwright() as playwright:
         assert page.locator('#incoming-requests .file-row').count() == 2
         assert page.locator('.request .file-row button').count() == 2
         assert page.locator('.request-footer button').inner_text() == '接收全部 (2)'
+
+        # Separate file-list batches from the same true peer are ONE device
+        # group. A different peer with exactly the same name stays distinct.
+        page.evaluate('''async () => {
+            const d = window.__demo;
+            await d.receiveChannel(d.state.peers.get('peer-1'), JSON.stringify({
+                kind:'file-list', offerId:'another-batch',
+                files:[{id:'file-c',name:'Archive.zip',size:54321}],
+            }));
+        }''')
+        assert page.locator('#incoming-requests > .request').count() == 1
+        assert page.locator('#incoming-requests > .request .file-row').count() == 3
+        assert page.locator('#incoming-requests .request-head small').inner_text() == '3 个文件'
+        assert page.locator('.request-footer button').inner_text() == '接收全部 (3)'
+        page.locator('.request-footer button').click()
+        assert page.evaluate('window.__demo.state.jobs.length') == 3
+        assert page.evaluate('''() => window.__demo.state.jobs.map(j => j.offerId)''') == [
+            'received','received','another-batch'
+        ], 'Receive All must keep each file original offer ID'
+        assert page.evaluate('window.__demo.state.queue.length') == 2
+        # Return to the clean two-file baseline for the existing queue test.
+        page.evaluate('''() => {
+            const d = window.__demo;
+            for (const job of d.state.jobs) if (job.timer) clearTimeout(job.timer);
+            d.state.active = null; d.state.queue = []; d.state.jobs = [];
+            for (const offer of d.state.offers.values()) {
+                for (const file of offer.files) file.status = 'pending';
+            }
+            d.renderRoomFiles();
+        }''')
+
+        page.evaluate('''async () => {
+            const d = window.__demo;
+            d.state.peers.get('peer-2').name = d.state.peers.get('peer-1').name;
+            await d.receiveChannel(d.state.peers.get('peer-2'), JSON.stringify({
+                kind:'file-list', offerId:'distinct-peer',
+                files:[{id:'file-z',name:'Other.bin',size:42}],
+            }));
+        }''')
+        assert page.locator('#incoming-requests > .request').count() == 2
+        assert page.locator('#incoming-requests > .request').first.locator('.file-row').count() == 3
+        assert page.locator('#incoming-requests > .request').nth(1).locator('.file-row').count() == 1
+        assert page.locator('#incoming-requests .request-head strong').nth(0).inner_text() != (
+            page.locator('#incoming-requests .request-head strong').nth(1).inner_text())
+        assert page.locator('#request-count').inner_text() == '4 个文件'
+        page.screenshot(path=str(ROOT / 'docs' / f'room-{label}-grouped-files.png'), full_page=True)
+        page.evaluate('''() => {
+            const d = window.__demo;
+            d.state.offers.delete('peer-1:another-batch');
+            d.state.offers.delete('peer-2:distinct-peer');
+            d.state.peers.get('peer-2').name = 'Silver Otter';
+            d.renderRoomFiles();
+        }''')
+        assert page.locator('#incoming-requests .file-row').count() == 2
         page.screenshot(path=str(ROOT / 'docs' / f'room-{label}-static.png'), full_page=True)
         page.locator('.request .file-row button').first.click()
         assert page.evaluate('window.__demo.state.jobs.length') == 1
