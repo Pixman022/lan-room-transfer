@@ -148,6 +148,17 @@ with sync_playwright() as playwright:
     a.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert a.locator('#peer-list strong').inner_text() == 'Mobile Phone'
 
+    # Leaving a mirror is tab-local and must not disconnect the owner or B.
+    duplicate.locator('#leave-room').click()
+    duplicate.locator('#home-screen').wait_for(state='visible')
+    assert a.locator('#room-screen').is_visible()
+    assert b.locator('#room-screen').is_visible()
+    assert a.evaluate('window.__smokeWebSockets.length') == 1
+    duplicate.locator('#enter-room').click()
+    duplicate.locator('#room-screen').wait_for(state='visible')
+    duplicate.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
+    assert duplicate.evaluate('window.__smokeWebSockets.length') == 0
+
     for page, name in ((a, 'desktop'), (b, 'mobile')):
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), name + ' horizontal overflow'
         page.screenshot(path=str(SCREENSHOT_DIR / (name + '-ui.png')), full_page=True)
