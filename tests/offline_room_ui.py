@@ -318,6 +318,22 @@ with sync_playwright() as playwright:
         assert page.locator('#incoming-requests > .request .file-row').count() == 3
         assert page.locator('#incoming-requests .request-head small').inner_text() == '3 个文件'
         assert page.locator('.request-footer button').inner_text() == '接收全部 (3)'
+        page.locator('.request-footer button').click()
+        assert page.evaluate('window.__demo.state.jobs.length') == 3
+        assert page.evaluate('''() => window.__demo.state.jobs.map(j => j.offerId)''') == [
+            'received','received','another-batch'
+        ], 'Receive All must keep each file original offer ID'
+        assert page.evaluate('window.__demo.state.queue.length') == 2
+        # Return to the clean two-file baseline for the existing queue test.
+        page.evaluate('''() => {
+            const d = window.__demo;
+            for (const job of d.state.jobs) if (job.timer) clearTimeout(job.timer);
+            d.state.active = null; d.state.queue = []; d.state.jobs = [];
+            for (const offer of d.state.offers.values()) {
+                for (const file of offer.files) file.status = 'pending';
+            }
+            d.renderRoomFiles();
+        }''')
 
         page.evaluate('''async () => {
             const d = window.__demo;
