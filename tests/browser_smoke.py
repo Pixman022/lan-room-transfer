@@ -31,6 +31,35 @@ with sync_playwright() as playwright:
     browser = playwright.chromium.launch(**options)
     one = browser.new_context(viewport={'width': 1280, 'height': 900})
     two = browser.new_context(viewport={'width': 390, 'height': 844})
+    # Instrument the local test response only; production app.js exposes no
+    # File bytes, credentials, or debugging state to global window.
+    def inject_file_state(route):
+        response = route.fetch()
+        instrument = """
+window.__smokeOwnFileData = async () => {
+  const rows = [];
+  for (const [offerId, files] of state.outbound) {
+    for (const [fileId, file] of files) {
+      rows.push({offerId, fileId, size:file.size,
+        bytes:[...new Uint8Array(await file.arrayBuffer())]});
+    }
+  }
+  return rows;
+};
+window.__smokeMirrorFileData = async () => {
+  const rows = [];
+  for (const [offerId, files] of mirroredRoom?.sources ?? []) {
+    for (const [fileId, file] of files) {
+      rows.push({offerId, fileId, size:file.size,
+        bytes:[...new Uint8Array(await file.arrayBuffer())]});
+    }
+  }
+  return rows;
+};
+"""
+        route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
+
+    one.route('**/static/app.js', inject_file_state)
     # Observe the real sockets so the smoke test can cause an unexpected
     # signalling-only close without mutating production application code.
     for context in (one, two):
@@ -127,6 +156,12 @@ with sync_playwright() as playwright:
     assert 'smoke.txt' in a.locator('#sent-files').inner_text()
     duplicate.locator('#sent-files').get_by_text('smoke.txt').wait_for()
     assert duplicate.locator('#request-count').inner_text() == a.locator('#request-count').inner_text()
+    assert [row['bytes'] for row in a.evaluate('window.__smokeOwnFileData()')] == [[104, 101, 108, 108, 111]]
+    duplicate.wait_for_function("""async () => {
+      const files = await window.__smokeMirrorFileData();
+      return files.length === 1 && files[0].size === 5;
+    }""")
+    assert [row['bytes'] for row in duplicate.evaluate('window.__smokeMirrorFileData()')] == [[104, 101, 108, 108, 111]]
 
     # Mirror actions run in the first tab's P2P controller; source Files stay
     # in that original tab and both UI copies update together.
@@ -222,6 +257,7 @@ with sync_playwright() as playwright:
     """, timeout=15000)
     assert duplicate.locator('#room-name').inner_text() == 'HOME2026'
     assert 'smoke.txt' in duplicate.locator('#sent-files').inner_text()
+    assert [row['bytes'] for row in duplicate.evaluate('window.__smokeOwnFileData()')] == [[104, 101, 108, 108, 111]], 'source File disappeared after explicit owner Exit'
     assert duplicate.locator('#connection-status').inner_text() == '房间已连接'
     duplicate.locator('#leave-room').click()
     duplicate.locator('#home-screen').wait_for(state='visible')
@@ -246,6 +282,10 @@ with sync_playwright() as playwright:
     survivor.locator('#room-screen').wait_for(state='visible')
     survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
     assert survivor.evaluate('window.__smokeWebSockets.length') == 0
+    survivor.wait_for_function("""async () => {
+      const files = await window.__smokeMirrorFileData();
+      return files.length === 1 && files[0].size === 18;
+    }""")
     third = one.new_page()
     third.goto(ROOT)
     third.locator('#room-code-input').fill('ABRUPT26')
@@ -262,6 +302,7 @@ with sync_playwright() as playwright:
     """, timeout=15000)
     assert survivor.locator('#room-name').inner_text() == 'ABRUPT26'
     assert survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').is_visible()
+    assert [row['bytes'] for row in survivor.evaluate('window.__smokeOwnFileData()')] == [list(b'test-handoff-bytes')], 'source File disappeared on owner tab close'
     assert '房间同步中断' not in survivor.locator('#feedback').inner_text()
     assert third.evaluate('window.__smokeWebSockets.length') == 0
     third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
@@ -276,8 +317,38 @@ with sync_playwright() as playwright:
     """, timeout=15000)
     assert third.locator('#room-name').inner_text() == 'ABRUPT26'
     assert third.locator('#sent-files').get_by_text('survive-owner-close.bin').is_visible()
+    assert [row['bytes'] for row in third.evaluate('window.__smokeOwnFileData()')] == [list(b'test-handoff-bytes')], 'source File disappeared after second owner tab close'
     third.locator('#leave-room').click()
     third.locator('#home-screen').wait_for(state='visible')
+
+    # Regression for real field report: user shares a file and immediately
+    # exits the transport tab, before the 120-ms coalesced UI snapshot fires.
+    # The handoff message must include source AND file-list metadata together.
+    quick = one.new_page()
+    quick.goto(ROOT)
+    quick.locator('#room-code-input').fill('FASTEXIT')
+    quick.locator('#enter-room').click()
+    quick.locator('#room-screen').wait_for(state='visible')
+    quick_follower = one.new_page()
+    quick_follower.goto(ROOT)
+    quick_follower.locator('#room-code-input').fill('FASTEXIT')
+    quick_follower.locator('#enter-room').click()
+    quick_follower.locator('#room-screen').wait_for(state='visible')
+    assert quick_follower.evaluate('window.__smokeWebSockets.length') == 0
+    with quick.expect_file_chooser() as chooser:
+        quick.locator('#drop-zone').click()
+    chooser.value.set_files({
+        'name':'fast-exit.txt', 'mimeType':'text/plain', 'buffer':b'content-survives',
+    })
+    # Intentionally DO NOT wait for the follower's file shelf to update.
+    quick.locator('#leave-room').click()
+    quick_follower.wait_for_function("""() =>
+        window.__smokeWebSockets.length === 1 &&
+        window.__smokeWebSockets[0].readyState === WebSocket.OPEN
+    """, timeout=15000)
+    quick_follower.locator('#sent-files').get_by_text('fast-exit.txt').wait_for()
+    assert [row['bytes'] for row in quick_follower.evaluate('window.__smokeOwnFileData()')] == [list(b'content-survives')], 'rapid Leave dropped shared file bytes'
+    quick_follower.locator('#leave-room').click()
     browser.close()
-    print('PASS: same-room automatic owner-tab election, staged File retention, mirror controls, R05/R06')
+    print('PASS: source File bytes survive rapid Leave and multi-tab handoff, R05/R06')
     print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
