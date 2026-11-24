@@ -88,6 +88,30 @@ const localRoomTabId = crypto.randomUUID();
 // A room belongs to one active tab per browser profile/origin. Hold the lock
 // across WebSocket reconnects; never use a display name or IP as identity.
 let roomTabLease = null;
+// A separate tab-scoped Web Lock stays held while a follower exists.
+// Unlike pagehide messages, browsers release it even on abrupt tab teardown.
+let sourceTabLease = null;
+function sourceTabLockName(code, tabId) {
+  return `lan-room-source-tab:${code}:${tabId}`;
+}
+async function holdSourceTabLease(code) {
+  if (!navigator.locks?.request || sourceTabLease?.code === code) return;
+  await new Promise(resolve => {
+    navigator.locks.request(sourceTabLockName(code, localRoomTabId), () =>
+      new Promise(release => {
+        sourceTabLease = { code, release };
+        resolve();
+      })).catch(error => {
+      trace('room.tab.presence-lock.failed', { error: String(error) });
+      resolve();
+    });
+  });
+}
+function releaseSourceTabLease() {
+  const lease = sourceTabLease;
+  sourceTabLease = null;
+  lease?.release();
+}
 let currentRoomExitRevision = null;
 // A deliberate Leave ends every tab of this room in the current browser
 // profile; closing a tab never changes this revision.
@@ -116,6 +140,7 @@ function releaseRoomTab(notifyChanging = true) {
   const lease = roomTabLease;
   roomTabLease = null;
   lease?.release();
+  releaseSourceTabLease();
 }
 
 // Browser-profile tabs share ONE WebSocket/P2P controller for each room.
@@ -295,6 +320,7 @@ function closeMirroredRoom(notifyTabLeft = true) {
   mirror.entryResolve?.();
   clearInterval(mirror.watchdog);
   mirror.channel.close();
+  releaseSourceTabLease();
   for (const url of mirror.savedUrls?.values() || []) URL.revokeObjectURL(url);
   try { sessionStorage.removeItem('lan-room-mirror-code'); }
   catch { /* Storage may be blocked. */ }
@@ -401,6 +427,8 @@ async function openMirroredRoom(code) {
     feedback('当前浏览器不支持房间页面同步，请使用另一标签页', true);
     return;
   }
+  // Must be held before this tab can share any File handles with its owner.
+  await holdSourceTabLease(code);
   const channel = new BroadcastChannel(roomChannelName(code));
   try { sessionStorage.setItem('lan-room-mirror-code', code); }
   catch { /* This tab can still mirror without stored room-code prefill. */ }
@@ -470,11 +498,33 @@ function handleMirroredAction(action, tabId) {
     case 'retry': if (job) retryJob(job); break;
   }
 }
+async function reapClosedSourceTabs(owner) {
+  if (!navigator.locks?.query || ownerRoomChannel !== owner ||
+      state.code !== owner.code) return;
+  const tabIds = new Set(state.ownOffers.map(offer => offer.ownerTabId)
+    .filter(tabId => tabId && tabId !== localRoomTabId));
+  if (!tabIds.size) return;
+  try {
+    const { held } = await navigator.locks.query();
+    if (ownerRoomChannel !== owner || state.code !== owner.code) return;
+    const live = new Set(held.map(lock => lock.name));
+    for (const tabId of tabIds) {
+      if (!live.has(sourceTabLockName(owner.code, tabId))) withdrawTabShares(tabId);
+    }
+  } catch (error) {
+    trace('room.tab.presence-check.failed', { error: String(error) });
+  }
+}
 function startOwnerRoomChannel(code) {
   if (!window.BroadcastChannel) return;
   closeOwnerRoomChannel();
   const channel = new BroadcastChannel(roomChannelName(code));
-  ownerRoomChannel = { code, channel, heartbeat: setInterval(broadcastRoomView, 4000) };
+  const owner = { code, channel, heartbeat: null };
+  ownerRoomChannel = owner;
+  owner.heartbeat = setInterval(() => {
+    broadcastRoomView();
+    reapClosedSourceTabs(owner);
+  }, 4000);
   channel.onmessage = ({ data }) => {
     if (data?.type === 'hello') {
       if (state.code === code) {
@@ -2607,4 +2657,5 @@ window.addEventListener('pagehide', () => {
     broadcastRoomHandoff();
     broadcastRoomView();
   }
+  releaseSourceTabLease();
 });
