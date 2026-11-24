@@ -1425,13 +1425,13 @@ async function receiveChannel(peer, data) {
     const offer = { peerId: peer.id, offerId: msg.offerId,
       files: msg.files.map(f => ({ id: f.id, name: f.name, size: f.size, status: 'pending' })) };
     state.offers.set(key, offer);
+    renderRoomFiles();
+    feedback(`${peerDisplayName(peer)} 分享了 ${msg.files.length} 个文件`);
     // Closing the previous transport tab loses its active DataChannel. Once
     // the new controller has re-established a verified P2P channel and the
     // original source reannounces its offer, restart pending transfers from
     // byte zero. Never pretend to resume a partial browser buffer.
     restartHandoffReceives(offer);
-    renderRoomFiles();
-    feedback(`${peerDisplayName(peer)} 分享了 ${msg.files.length} 个文件`);
   } else if (msg.kind === 'file-withdraw') {
     if (typeof msg.offerId === 'string' && typeof msg.fileId === 'string') {
       withdrawPeerFile(peer.id, msg.offerId, msg.fileId);
