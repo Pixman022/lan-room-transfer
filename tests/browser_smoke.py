@@ -21,7 +21,11 @@ def rename(page, button, label, name):
     editor.fill(name)
     editor.press('Enter')
     assert editor.get_attribute('contenteditable') == 'false'
-    assert editor.inner_text() == name
+    # A mirrored rename may be immediately overlaid by an older owner
+    # snapshot; verify the settled rendered name, not a synchronous race.
+    page.wait_for_function(
+        '([selector, expected]) => document.querySelector(selector)?.textContent.trim() === expected',
+        arg=[label, name], timeout=10000)
 
 
 with sync_playwright() as playwright:
@@ -73,6 +77,15 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
   name: job.name, received: job.received, status: job.status,
   recovering: job.recovering === true, cancelled: job.cancelled === true,
 }));
+// Simulate browsers that discard a pagehide BroadcastChannel message.
+window.__smokeDropTabLeftNotice = () => {
+  if (!mirroredRoom) throw new Error('expected mirrored tab');
+  const channel = mirroredRoom.channel;
+  const send = channel.postMessage.bind(channel);
+  channel.postMessage = message => {
+    if (message?.type !== 'tab-left') send(message);
+  };
+};
 """
         route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
 
@@ -209,20 +222,43 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
     a.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert a.locator('#peer-list strong').inner_text() == 'Mobile Phone'
 
-    # Closing a follower *tab* withdraws only its shares; it does not
-    # initiate the explicit all-tab Leave action.
+    # T02: three tabs from one Chrome profile share one room member.
+    # A holds the transport; B is about to close; C must keep its source.
+    sibling = one.new_page()
+    sibling.on('pageerror', lambda err: errors.append(str(err)))
+    sibling.goto(ROOT)
+    sibling.locator('#room-code-input').fill('HOME2026')
+    sibling.locator('#enter-room').click()
+    sibling.locator('#room-screen').wait_for(state='visible')
+    assert sibling.evaluate('window.__smokeWebSockets.length') == 0
+    with sibling.expect_file_chooser() as sibling_chooser:
+        sibling.locator('#drop-zone').click()
+    sibling_chooser.value.set_files({
+        'name':'third-tab-kept.txt', 'mimeType':'text/plain', 'buffer':b'c-survives',
+    })
+    a.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for()
+
+    # Closing follower B must withdraw only its shares, not C's or A's.
     with duplicate.expect_file_chooser() as local_chooser:
         duplicate.locator('#drop-zone').click()
     local_chooser.value.set_files({
         'name':'mirror-exit.txt', 'mimeType':'text/plain', 'buffer':b'local-follower',
     })
     a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
+    # T02 stress case: the follower disappears without a reliable pagehide
+    # notification. Owner must reap that tab's stale shares independently.
+    duplicate.evaluate('window.__smokeDropTabLeftNotice()')
     duplicate.close()
-    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for(state='detached')
+    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for(state='detached', timeout=15000)
     a.locator('#sent-files').get_by_text('smoke.txt').wait_for()
+    a.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for()
+    assert sibling.locator('#room-screen').is_visible()
     assert a.locator('#room-screen').is_visible()
     assert b.locator('#room-screen').is_visible()
     assert a.evaluate('window.__smokeWebSockets.length') == 1
+    assert sibling.evaluate('window.__smokeWebSockets.length') == 0
+    sibling.close()
+    a.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for(state='detached')
     duplicate = one.new_page()
     duplicate.on('pageerror', lambda err: errors.append(str(err)))
     duplicate.goto(ROOT)
