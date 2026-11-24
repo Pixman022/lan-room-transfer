@@ -2468,8 +2468,9 @@ test('a surviving room tab claims transport ownership and retains staged files a
   assert.equal(t.state.jobs[0].url, 'blob:mirror-saved',
     'a saved download can continue using a URL owned by the surviving tab');
   assert.equal(t.state.jobs[0].blob.size, 5);
-  assert.equal(t.state.jobs[1].status, '失败：连接已切换，请重新接收',
-    'no false resumable byte-progress guarantee');
+  assert.equal(t.state.jobs[1].status, '等待连接恢复后重新接收',
+    'the interrupted job waits for an exact source offer before starting over');
+  assert.equal(t.state.jobs[1].recovering, true);
   assert.equal(t.state.queue.length, 0);
   assert.equal(t.state.active, null);
   assert.equal(t.FakeWebSocket.sockets.length, 1, 'one new socket takes over the room');
