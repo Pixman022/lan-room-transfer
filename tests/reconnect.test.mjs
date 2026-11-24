@@ -2389,3 +2389,49 @@ test('secondary room view mirrors member/file jobs and delegates receive without
   assert.equal(t.elements.get('room-screen').hidden, true);
   assert.equal(t.FakeWebSocket.sockets.length, 0);
 });
+
+test('stale mirrored room blocks delegated mutations and restores controls on fresh owner snapshot', () => {
+  const t = harness();
+  const snapshot = {
+    code: '5832', name: 'Amber Fox', connected: true, roomEntry: 'resumed',
+    peers: [{id:'peer-b',name:'Phone',ready:true,reason:'文件直连就绪'}],
+    ownOffers: [{offerId:'my-share',files:[{id:'mine',name:'local.bin',size:9}]}],
+    offers: [{peerId:'peer-b',offerId:'offer-1',files:[
+      {id:'f1',name:'remote.bin',size:5,status:'pending'}]}],
+    jobs: [], diagnostics:{signal:'connected',peerCount:1,peers:[]},
+    feedback:'同步完成', feedbackError:false,
+  };
+  t.run('window.mirrorCommands = []');
+  // No browser WebSocket is opened for the mirrored view.
+  t.run("mirroredRoom = {code:'5832',channel:{postMessage(message){window.mirrorCommands.push(message)},close(){}}}");
+  t.run('applyMirroredView(' + JSON.stringify(snapshot) + ')');
+  assert.equal(t.elements.get('drop-zone').disabled, false);
+  assert.equal(t.elements.get('edit-device-name').disabled, false);
+  assert.equal(t.elements.get('connection-status').textContent, '文件直连就绪');
+
+  t.run("mirroredRoom.stale = true; mirroredRoom.view.connected = false; state.generation = ''; renderPeers(); renderRoomFiles(); updateMirrorControls()");
+  assert.equal(t.elements.get('connection-status').textContent, '房间同步中断');
+  assert.equal(t.elements.get('drop-zone').disabled, true);
+  assert.equal(t.elements.get('send-files').disabled, true);
+  assert.equal(t.elements.get('edit-device-name').disabled, true);
+  assert.equal(t.run('diagnosticsSnapshot().signal'), 'unknown',
+    'stale diagnostics must not claim current signalling is connected');
+  t.run("acceptFile(state.offers.get('peer-b:offer-1'), state.offers.get('peer-b:offer-1').files[0])");
+  t.run("withdrawSharedFile('my-share','mine')");
+  t.run("shareFiles([{name:'too-late.bin',size:3}])");
+  t.run("saveDeviceName('Unconfirmed Rename')");
+  assert.equal(t.run('window.mirrorCommands.length'), 0, 'no stale commands are forwarded');
+  assert.equal(t.state.ownOffers[0].files.length, 1, 'stale actions cannot mutate mirrored file shelf');
+  assert.equal(t.run('deviceName()'), 'Amber Fox', 'stale rename must not change local name');
+
+  t.run('applyMirroredView(' + JSON.stringify(snapshot) + ')');
+  assert.equal(t.elements.get('drop-zone').disabled, false);
+  assert.equal(t.elements.get('send-files').disabled, false);
+  assert.equal(t.elements.get('edit-device-name').disabled, false);
+  assert.equal(t.elements.get('connection-status').textContent, '文件直连就绪');
+  t.run("acceptFile(state.offers.get('peer-b:offer-1'), state.offers.get('peer-b:offer-1').files[0])");
+  assert.equal(t.run('window.mirrorCommands.length'), 1, 'action forwarding resumes after a fresh snapshot');
+  t.run('closeMirroredRoom()');
+  assert.equal(t.elements.get('drop-zone').disabled, false, 'leaving mirror clears the stale button state');
+  assert.equal(t.FakeWebSocket.sockets.length, 0);
+});
