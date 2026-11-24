@@ -1808,6 +1808,9 @@ function renderRoomFiles() {
       bar.style.width = `${job.size ? Math.min(100, job.received / job.size * 100) : (job.url ? 100 : 0)}%`;
       progress.append(bar);
       info.append(progress);
+      if (job.url && job.size === 0) {
+        info.append(elem('span', '', '空文件（0 B）可能无法在部分设备保存；校验通过不代表已保存到本地'));
+      }
     } else {
       info.append(elem('span', '', humanSize(file.size)));
     }
