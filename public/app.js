@@ -84,6 +84,7 @@ const state = {
 };
 
 let currentDeviceName;
+const localRoomTabId = crypto.randomUUID();
 // A room belongs to one active tab per browser profile/origin. Hold the lock
 // across WebSocket reconnects; never use a display name or IP as identity.
 let roomTabLease = null;
@@ -131,14 +132,15 @@ function closeOwnerRoomChannel() {
 }
 function roomViewSnapshot() {
   return {
-    code: state.code, name: deviceName(),
+    code: state.code, name: deviceName(), transportTabId: localRoomTabId,
     connected: state.ws?.readyState === WebSocket.OPEN && Boolean(state.generation),
     roomEntry: state.lastRoomEntry,
     peers: [...state.peers.values()].map(peer => ({
       id: peer.id, name: peer.name, ready: peer.ready, reason: peer.reason,
     })),
     ownOffers: state.ownOffers.map(offer => ({
-      offerId: offer.offerId, files: offer.files.map(file => ({ ...file })),
+      offerId: offer.offerId, ownerTabId: offer.ownerTabId,
+      files: offer.files.map(file => ({ ...file })),
     })),
     offers: [...state.offers.values()].map(offer => ({
       peerId: offer.peerId, offerId: offer.offerId,
@@ -166,6 +168,7 @@ function broadcastRoomHandoff() {
     type: 'handoff',
     code: state.code,
     session: state.id && state.token ? { id: state.id, token: state.token } : null,
+    transportTabId: localRoomTabId,
     sources: [...state.outbound].map(([offerId, files]) => ({
       offerId, files: [...files].map(([fileId, file]) => ({ fileId, file })),
     })),
@@ -173,7 +176,8 @@ function broadcastRoomHandoff() {
     // The regular UI snapshot is coalesced, so an owner leaving immediately
     // after Share must not leave a follower with files but no file-list entry.
     ownOffers: state.ownOffers.map(offer => ({
-      offerId: offer.offerId, files: offer.files.map(file => ({ ...file })),
+      offerId: offer.offerId, ownerTabId: offer.ownerTabId,
+      files: offer.files.map(file => ({ ...file })),
     })),
     saved: state.jobs.filter(job => job.blob && job.url).map(job => ({
       key: roomJobKey(job), blob: job.blob,
@@ -206,16 +210,18 @@ function sendMirrorAction(action) {
     feedback('房间连接正在恢复，请稍后重试', true);
     return;
   }
-  mirroredRoom.channel.postMessage({ type: 'action', action });
+  mirroredRoom.channel.postMessage({ type: 'action', tabId: localRoomTabId, action });
 }
 function updateMirrorResources(mirror, message) {
   mirror.session = message.session || null;
+  mirror.transportTabId = message.transportTabId || mirror.transportTabId;
   mirror.sources = new Map((message.sources || []).map(offer => [
     offer.offerId, new Map(offer.files.map(item => [item.fileId, item.file])),
   ]));
   if (Array.isArray(message.ownOffers)) {
     mirror.sharedOffers = message.ownOffers.map(offer => ({
-      offerId: offer.offerId, files: offer.files.map(file => ({ ...file })),
+      offerId: offer.offerId, ownerTabId: offer.ownerTabId,
+      files: offer.files.map(file => ({ ...file })),
     }));
   }
   for (const item of message.saved || []) {
@@ -242,6 +248,7 @@ function applyMirroredView(view) {
   if (!mirroredRoom || view.code !== mirroredRoom.code) return;
   const mirror = mirroredRoom;
   mirror.view = view;
+  mirror.transportTabId = view.transportTabId || mirror.transportTabId;
   mirror.lastUpdate = Date.now();
   mirror.stale = false;
   state.code = view.code;
@@ -271,6 +278,7 @@ function applyMirroredView(view) {
 function closeMirroredRoom() {
   if (!mirroredRoom) return;
   const mirror = mirroredRoom;
+  mirror.channel.postMessage({ type: 'tab-left', code: mirror.code, tabId: localRoomTabId });
   mirror.takeoverAbort?.abort();
   if (mirror.entryTimeout) clearTimeout(mirror.entryTimeout);
   mirror.entryResolve?.();
@@ -329,12 +337,16 @@ function promoteMirroredRoom(mirror) {
   state.lastRoomEntry = view.roomEntry;
   state.peers = new Map();
   state.offers = new Map();
-  state.outbound = mirror.sources;
+  // Take over the room, not the source files of the tab that closed.
+  // File offers selected in surviving tabs remain available.
   state.ownOffers = (mirror.sharedOffers || view.ownOffers).filter(offer => {
+    if (mirror.transportTabId && offer.ownerTabId === mirror.transportTabId) return false;
     const files = mirror.sources.get(offer.offerId);
     offer.files = offer.files.filter(file => files?.has(file.id));
     return offer.files.length;
   });
+  state.outbound = new Map([...mirror.sources].filter(([offerId]) =>
+    state.ownOffers.some(offer => offer.offerId === offerId)));
   state.jobs = view.jobs.map(job => {
     const key = roomJobKey(job);
     const blob = mirror.savedBlobs.get(key);
@@ -370,7 +382,8 @@ async function openMirroredRoom(code) {
   const channel = new BroadcastChannel(roomChannelName(code));
   try { sessionStorage.setItem('lan-room-mirror-code', code); }
   catch { /* This tab can still mirror without stored room-code prefill. */ }
-  const mirror = { code, channel, view: null, session: null, sources: new Map(),
+  const mirror = { code, channel, view: null, session: null, transportTabId: null,
+    sources: new Map(),
     savedBlobs: new Map(), savedUrls: new Map(), lastUpdate: Date.now(),
     stale: false, takeoverAbort: null, watchdog: null };
   mirroredRoom = mirror;
@@ -418,7 +431,7 @@ async function openMirroredRoom(code) {
     channel.postMessage({ type: 'hello' });
   });
 }
-function handleMirroredAction(action) {
+function handleMirroredAction(action, tabId) {
   if (!action || !ownerRoomChannel || !state.code || state.code !== ownerRoomChannel.code) return;
   const offer = state.offers.get(`${action.peerId}:${action.offerId}`);
   const file = offer?.files.find(item => item.id === action.fileId);
@@ -426,7 +439,7 @@ function handleMirroredAction(action) {
     item.offerId === action.offerId && item.fileId === action.fileId);
   switch (action.kind) {
     case 'rename': saveDeviceName(action.name); break;
-    case 'share': if (Array.isArray(action.files)) shareFiles(action.files); break;
+    case 'share': if (Array.isArray(action.files)) shareFiles(action.files, tabId); break;
     case 'withdraw': withdrawSharedFile(action.offerId, action.fileId); break;
     case 'accept': if (offer && file && state.peers.get(offer.peerId)?.ready) acceptFile(offer, file); break;
     case 'cancel': if (job) cancelJob(job); break;
@@ -449,7 +462,10 @@ function startOwnerRoomChannel(code) {
         channel.postMessage({ type: 'pending', code });
       }
     } else if (data?.type === 'action') {
-      handleMirroredAction(data.action);
+      handleMirroredAction(data.action, data.tabId);
+    } else if (data?.type === 'tab-left' && data.code === code &&
+               typeof data.tabId === 'string') {
+      withdrawTabShares(data.tabId);
     }
   };
 }
@@ -1809,7 +1825,7 @@ function syncSharedOffers(peer) {
     }
   }
 }
-function shareFiles(files) {
+function shareFiles(files, ownerTabId = localRoomTabId) {
   if (mirroredRoom) {
     if (files.length) sendMirrorAction({ kind: 'share', files });
     return;
@@ -1829,7 +1845,7 @@ function shareFiles(files) {
     return { id, name: file.name, size: file.size };
   });
   state.outbound.set(offerId, fileMap);
-  state.ownOffers.push({ offerId, files: metadata });
+  state.ownOffers.push({ offerId, ownerTabId, files: metadata });
   broadcastRoomHandoff();
   for (const peer of state.peers.values()) syncSharedOffers(peer);
   renderSentFiles();
@@ -1837,6 +1853,12 @@ function shareFiles(files) {
   feedback(files.some(file => file.size > LARGE_FILE_WARNING_BYTES)
     ? '大文件已加入共享列表；实验性传输可能因浏览器内存不足而失败'
     : ready ? '文件已加入房间共享列表' : '文件已添加，等待设备直连');
+}
+function withdrawTabShares(tabId) {
+  for (const offer of [...state.ownOffers]) {
+    if (offer.ownerTabId !== tabId) continue;
+    for (const file of [...offer.files]) withdrawSharedFile(offer.offerId, file.id);
+  }
 }
 function withdrawSharedFile(offerId, fileId) {
   if (mirroredRoom) {
@@ -2417,6 +2439,8 @@ $('leave-room').onclick = () => {
     return;
   }
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
+  withdrawTabShares(localRoomTabId);
+  // Only sources from remaining tabs are handed over with the room connection.
   // Flush the final source+metadata state before releasing the room lock.
   // Otherwise a pending 120 ms UI update can be cancelled by Leave.
   broadcastRoomHandoff();
@@ -2468,4 +2492,15 @@ $('send-files').addEventListener('change', event => {
 });
 window.addEventListener('beforeunload', event => {
   if (state.active) { event.preventDefault(); event.returnValue = ''; }
+});
+window.addEventListener('pagehide', () => {
+  if (mirroredRoom) {
+    mirroredRoom.channel.postMessage({
+      type: 'tab-left', code: mirroredRoom.code, tabId: localRoomTabId,
+    });
+  } else if (ownerRoomChannel) {
+    withdrawTabShares(localRoomTabId);
+    broadcastRoomHandoff();
+    broadcastRoomView();
+  }
 });
