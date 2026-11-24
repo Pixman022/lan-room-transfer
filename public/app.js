@@ -169,6 +169,8 @@ function sendMirrorAction(action) {
 function applyMirroredView(view) {
   if (!mirroredRoom || view.code !== mirroredRoom.code) return;
   mirroredRoom.view = view;
+  mirroredRoom.lastUpdate = Date.now();
+  mirroredRoom.stale = false;
   state.code = view.code;
   state.lastRoomEntry = view.roomEntry;
   state.generation = view.connected ? 'mirrored' : '';
@@ -193,6 +195,7 @@ function applyMirroredView(view) {
 }
 function closeMirroredRoom() {
   if (!mirroredRoom) return;
+  clearInterval(mirroredRoom.watchdog);
   mirroredRoom.channel.close();
   $('qa-panel').hidden = !QA_MODE;
   $('qa-enable').hidden = QA_MODE;
@@ -211,7 +214,17 @@ async function openMirroredRoom(code) {
     return;
   }
   const channel = new BroadcastChannel(roomChannelName(code));
-  mirroredRoom = { code, channel, view: null };
+  mirroredRoom = { code, channel, view: null, lastUpdate: Date.now(), stale: false,
+    watchdog: setInterval(() => {
+      if (!mirroredRoom || mirroredRoom.channel !== channel || !mirroredRoom.view ||
+          mirroredRoom.stale || Date.now() - mirroredRoom.lastUpdate < 30000) return;
+      mirroredRoom.stale = true;
+      mirroredRoom.view.connected = false;
+      state.generation = '';
+      updateConnectionSummary();
+      feedback('原房间页面暂时没有同步更新，请确认原标签页仍在运行', true);
+    }, 5000),
+  };
   let connected = false;
   await new Promise(resolve => {
     const timeout = setTimeout(() => {
