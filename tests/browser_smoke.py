@@ -96,6 +96,15 @@ with sync_playwright() as playwright:
     assert a.locator('#peer-list .device-row').count() == 1
     assert b.locator('#peer-list .device-row').count() == 1
 
+    # A mirrored tab reload keeps the room-code prefill, then resumes the
+    # shared view without making its own connection.
+    duplicate.reload()
+    assert duplicate.locator('#room-code-input').input_value() == 'HOME2026'
+    duplicate.locator('#enter-room').click()
+    duplicate.locator('#room-screen').wait_for(state='visible')
+    duplicate.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
+    assert duplicate.evaluate('window.__smokeWebSockets.length') == 0
+
     # Holding a room-specific lock must not block a DIFFERENT room in the
     # same browser profile.
     other = one.new_page()
