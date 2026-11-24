@@ -73,6 +73,15 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
   name: job.name, received: job.received, status: job.status,
   recovering: job.recovering === true, cancelled: job.cancelled === true,
 }));
+// Simulate browsers that discard a pagehide BroadcastChannel message.
+window.__smokeDropTabLeftNotice = () => {
+  if (!mirroredRoom) throw new Error('expected mirrored tab');
+  const channel = mirroredRoom.channel;
+  const send = channel.postMessage.bind(channel);
+  channel.postMessage = message => {
+    if (message?.type !== 'tab-left') send(message);
+  };
+};
 """
         route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
 
@@ -217,8 +226,11 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
         'name':'mirror-exit.txt', 'mimeType':'text/plain', 'buffer':b'local-follower',
     })
     a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
+    # T02 stress case: the follower disappears without a reliable pagehide
+    # notification. Owner must reap that tab's stale shares independently.
+    duplicate.evaluate('window.__smokeDropTabLeftNotice()')
     duplicate.close()
-    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for(state='detached')
+    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for(state='detached', timeout=15000)
     a.locator('#sent-files').get_by_text('smoke.txt').wait_for()
     assert a.locator('#room-screen').is_visible()
     assert b.locator('#room-screen').is_visible()
