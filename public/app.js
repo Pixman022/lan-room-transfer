@@ -195,7 +195,8 @@ function applyMirroredView(view) {
 }
 function closeMirroredRoom() {
   if (!mirroredRoom) return;
-  sessionStorage.removeItem('lan-room-mirror-code');
+  try { sessionStorage.removeItem('lan-room-mirror-code'); }
+  catch { /* Storage may be blocked. */ }
   clearInterval(mirroredRoom.watchdog);
   mirroredRoom.channel.close();
   $('qa-panel').hidden = !QA_MODE;
@@ -215,7 +216,8 @@ async function openMirroredRoom(code) {
     return;
   }
   const channel = new BroadcastChannel(roomChannelName(code));
-  sessionStorage.setItem('lan-room-mirror-code', code);
+  try { sessionStorage.setItem('lan-room-mirror-code', code); }
+  catch { /* This tab can still mirror without stored room-code prefill. */ }
   mirroredRoom = { code, channel, view: null, lastUpdate: Date.now(), stale: false,
     watchdog: setInterval(() => {
       if (!mirroredRoom || mirroredRoom.channel !== channel || !mirroredRoom.view ||
@@ -2191,7 +2193,9 @@ async function suggestCode() {
   } catch { /* Keep the locally generated four-digit fallback. */ }
 }
 const priorSession = remembered();
-const priorMirrorCode = sessionStorage.getItem('lan-room-mirror-code');
+let priorMirrorCode = null;
+try { priorMirrorCode = sessionStorage.getItem('lan-room-mirror-code'); }
+catch { /* Storage may be blocked. */ }
 if (priorSession?.code && /^[A-Z0-9]{4,16}$/.test(priorSession.code)) {
   codeInput.value = priorSession.code;
 } else if (priorMirrorCode && /^[A-Z0-9]{4,16}$/.test(priorMirrorCode)) {
