@@ -202,6 +202,14 @@ window.__smokeMirrorFileData = async () => {
     duplicate.locator('#room-screen').wait_for(state='visible')
     duplicate.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert duplicate.evaluate('window.__smokeWebSockets.length') == 0
+    # File picked in the surviving tab belongs to that tab, even while the
+    # original transport tab owns the one P2P connection.
+    with duplicate.expect_file_chooser() as keep_chooser:
+        duplicate.locator('#drop-zone').click()
+    keep_chooser.value.set_files({
+        'name':'mirror-stay.txt', 'mimeType':'text/plain', 'buffer':b'keep-mirror',
+    })
+    a.locator('#sent-files').get_by_text('mirror-stay.txt').wait_for()
 
     for page, name in ((a, 'desktop'), (b, 'mobile')):
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), name + ' horizontal overflow'
@@ -241,23 +249,24 @@ window.__smokeMirrorFileData = async () => {
     """, timeout=15000)
     assert '房间进入：created' in a.locator('#diagnostics-content').inner_text()
     assert a.locator('#room-name').inner_text() == 'HOME2026'
-    assert a.locator('#sent-files .file-row').count() == 1
+    assert a.locator('#sent-files .file-row').count() == 2
     assert 'smoke.txt' in a.locator('#sent-files').inner_text()
+    assert 'mirror-stay.txt' in a.locator('#sent-files').inner_text()
     a.locator('#toggle-diagnostics').click()
     assert not errors, errors
     a.locator('#leave-room').click()
     a.locator('#home-screen').wait_for(state='visible')
-    # The owner may leave without ejecting its other same-room tabs. The
-    # surviving tab automatically takes the exclusive lock, reconnects with
-    # the same room code and keeps its shared File object available.
+    # Exiting the owner tab withdraws only files selected by that tab;
+    # independently selected mirror files remain with the surviving tab.
     duplicate.wait_for_function("""() =>
         window.__smokeWebSockets.length === 1 &&
         window.__smokeWebSockets[0].readyState === WebSocket.OPEN &&
         document.getElementById('room-screen').hidden === false
     """, timeout=15000)
     assert duplicate.locator('#room-name').inner_text() == 'HOME2026'
-    assert 'smoke.txt' in duplicate.locator('#sent-files').inner_text()
-    assert [row['bytes'] for row in duplicate.evaluate('window.__smokeOwnFileData()')] == [[104, 101, 108, 108, 111]], 'source File disappeared after explicit owner Exit'
+    duplicate.locator('#sent-files').get_by_text('smoke.txt').wait_for(state='detached')
+    duplicate.locator('#sent-files').get_by_text('mirror-stay.txt').wait_for()
+    assert [row['bytes'] for row in duplicate.evaluate('window.__smokeOwnFileData()')] == [list(b'keep-mirror')], 'surviving tab lost its own shared file'
     assert duplicate.locator('#connection-status').inner_text() == '房间已连接'
     duplicate.locator('#leave-room').click()
     duplicate.locator('#home-screen').wait_for(state='visible')
@@ -293,6 +302,20 @@ window.__smokeMirrorFileData = async () => {
     third.locator('#room-screen').wait_for(state='visible')
     third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
     assert third.evaluate('window.__smokeWebSockets.length') == 0
+    with survivor.expect_file_chooser() as survivor_chooser:
+        survivor.locator('#drop-zone').click()
+    survivor_chooser.value.set_files({
+        'name':'survivor-owned.bin', 'mimeType':'application/octet-stream',
+        'buffer':b'from-second-tab',
+    })
+    with third.expect_file_chooser() as third_chooser:
+        third.locator('#drop-zone').click()
+    third_chooser.value.set_files({
+        'name':'third-owned.bin', 'mimeType':'application/octet-stream',
+        'buffer':b'from-third-tab',
+    })
+    survivor.locator('#sent-files').get_by_text('third-owned.bin').wait_for()
+    third.locator('#sent-files').get_by_text('survivor-owned.bin').wait_for()
 
     abrupt.close()
     survivor.wait_for_function("""() =>
@@ -301,14 +324,18 @@ window.__smokeMirrorFileData = async () => {
         document.getElementById('room-screen').hidden === false
     """, timeout=15000)
     assert survivor.locator('#room-name').inner_text() == 'ABRUPT26'
-    assert survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').is_visible()
-    assert [row['bytes'] for row in survivor.evaluate('window.__smokeOwnFileData()')] == [list(b'test-handoff-bytes')], 'source File disappeared on owner tab close'
+    survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for(state='detached')
+    survivor.locator('#sent-files').get_by_text('survivor-owned.bin').wait_for()
+    survivor.locator('#sent-files').get_by_text('third-owned.bin').wait_for()
+    assert [row['bytes'] for row in survivor.evaluate('window.__smokeOwnFileData()')] == [
+        list(b'from-second-tab'), list(b'from-third-tab')
+    ], 'file selected by a surviving tab was lost'
     assert '房间同步中断' not in survivor.locator('#feedback').inner_text()
     assert third.evaluate('window.__smokeWebSockets.length') == 0
-    third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
+    third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for(state='detached')
 
-    # With three same-room tabs, the final surviving tab must also take over
-    # the same room and its staged File after the second owner disappears.
+    # When the second tab closes, its own file disappears but the third
+    # tab's independently selected file remains available.
     survivor.close()
     third.wait_for_function("""() =>
         window.__smokeWebSockets.length === 1 &&
@@ -316,14 +343,14 @@ window.__smokeMirrorFileData = async () => {
         document.getElementById('room-screen').hidden === false
     """, timeout=15000)
     assert third.locator('#room-name').inner_text() == 'ABRUPT26'
-    assert third.locator('#sent-files').get_by_text('survive-owner-close.bin').is_visible()
-    assert [row['bytes'] for row in third.evaluate('window.__smokeOwnFileData()')] == [list(b'test-handoff-bytes')], 'source File disappeared after second owner tab close'
+    third.locator('#sent-files').get_by_text('survivor-owned.bin').wait_for(state='detached')
+    third.locator('#sent-files').get_by_text('third-owned.bin').wait_for()
+    assert [row['bytes'] for row in third.evaluate('window.__smokeOwnFileData()')] == [list(b'from-third-tab')], 'third tab lost its own file'
     third.locator('#leave-room').click()
     third.locator('#home-screen').wait_for(state='visible')
 
-    # Regression for real field report: user shares a file and immediately
-    # exits the transport tab, before the 120-ms coalesced UI snapshot fires.
-    # The handoff message must include source AND file-list metadata together.
+    # A newly shared file disappears when its selecting tab immediately exits,
+    # even before the next coalesced UI snapshot is emitted.
     quick = one.new_page()
     quick.goto(ROOT)
     quick.locator('#room-code-input').fill('FASTEXIT')
@@ -335,6 +362,12 @@ window.__smokeMirrorFileData = async () => {
     quick_follower.locator('#enter-room').click()
     quick_follower.locator('#room-screen').wait_for(state='visible')
     assert quick_follower.evaluate('window.__smokeWebSockets.length') == 0
+    with quick_follower.expect_file_chooser() as keep_chooser:
+        quick_follower.locator('#drop-zone').click()
+    keep_chooser.value.set_files({
+        'name':'still-open.txt', 'mimeType':'text/plain', 'buffer':b'still-open',
+    })
+    quick.locator('#sent-files').get_by_text('still-open.txt').wait_for()
     with quick.expect_file_chooser() as chooser:
         quick.locator('#drop-zone').click()
     chooser.value.set_files({
@@ -346,9 +379,10 @@ window.__smokeMirrorFileData = async () => {
         window.__smokeWebSockets.length === 1 &&
         window.__smokeWebSockets[0].readyState === WebSocket.OPEN
     """, timeout=15000)
-    quick_follower.locator('#sent-files').get_by_text('fast-exit.txt').wait_for()
-    assert [row['bytes'] for row in quick_follower.evaluate('window.__smokeOwnFileData()')] == [list(b'content-survives')], 'rapid Leave dropped shared file bytes'
+    quick_follower.locator('#sent-files').get_by_text('fast-exit.txt').wait_for(state='detached')
+    quick_follower.locator('#sent-files').get_by_text('still-open.txt').wait_for()
+    assert [row['bytes'] for row in quick_follower.evaluate('window.__smokeOwnFileData()')] == [list(b'still-open')], 'surviving tab lost its independently selected file'
     quick_follower.locator('#leave-room').click()
     browser.close()
-    print('PASS: source File bytes survive rapid Leave and multi-tab handoff, R05/R06')
+    print('PASS: per-tab source lifetime, surviving-tab Files, multi-tab takeover, R05/R06')
     print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
