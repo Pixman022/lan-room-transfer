@@ -2184,7 +2184,8 @@ test('room file rows merge receive, transfer progress and saved download without
     const action = row?.children[2]?.children[0];
     return {groups:groups.length,rows:rows.length,name:info?.children[0]?.textContent,
       state:info?.children[1]?.textContent,progress:info?.children[2]?.children[0]?.style.width,
-      action:action?.textContent,download:action?.download};
+      action:action?.textContent,download:action?.download,
+      zeroByteNotice:info?.children.some(node=>node.textContent?.includes('空文件（0 B）'))};
   };
   t.run('renderRoomFiles()');
   assert.equal(view().groups, 1);
@@ -2207,6 +2208,12 @@ test('room file rows merge receive, transfer progress and saved download without
   assert.equal(view().rows, 1);
   assert.equal(view().action, '保存');
   assert.equal(view().download, 'payload.bin');
+  assert.equal(view().zeroByteNotice, false, 'ordinary files have no empty-file warning');
+  job.size = 0; job.received = 0;
+  t.run('renderRoomFiles()');
+  assert.equal(view().zeroByteNotice, true, 'verified empty download warns about platform save limitations');
+  assert.equal(view().progress, '100%');
+  assert.equal(view().action, '保存', 'empty file remains available for browsers that support it');
   t.state.offers.clear();
   t.run('renderRoomFiles()');
   assert.equal(view().rows, 1, 'saved file stays reachable after offer disappears');
