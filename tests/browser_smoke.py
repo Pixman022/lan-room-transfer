@@ -320,6 +320,35 @@ window.__smokeMirrorFileData = async () => {
     assert [row['bytes'] for row in third.evaluate('window.__smokeOwnFileData()')] == [list(b'test-handoff-bytes')], 'source File disappeared after second owner tab close'
     third.locator('#leave-room').click()
     third.locator('#home-screen').wait_for(state='visible')
+
+    # Regression for real field report: user shares a file and immediately
+    # exits the transport tab, before the 120-ms coalesced UI snapshot fires.
+    # The handoff message must include source AND file-list metadata together.
+    quick = one.new_page()
+    quick.goto(ROOT)
+    quick.locator('#room-code-input').fill('FASTEXIT')
+    quick.locator('#enter-room').click()
+    quick.locator('#room-screen').wait_for(state='visible')
+    quick_follower = one.new_page()
+    quick_follower.goto(ROOT)
+    quick_follower.locator('#room-code-input').fill('FASTEXIT')
+    quick_follower.locator('#enter-room').click()
+    quick_follower.locator('#room-screen').wait_for(state='visible')
+    assert quick_follower.evaluate('window.__smokeWebSockets.length') == 0
+    with quick.expect_file_chooser() as chooser:
+        quick.locator('#drop-zone').click()
+    chooser.value.set_files({
+        'name':'fast-exit.txt', 'mimeType':'text/plain', 'buffer':b'content-survives',
+    })
+    # Intentionally DO NOT wait for the follower's file shelf to update.
+    quick.locator('#leave-room').click()
+    quick_follower.wait_for_function("""() =>
+        window.__smokeWebSockets.length === 1 &&
+        window.__smokeWebSockets[0].readyState === WebSocket.OPEN
+    """, timeout=15000)
+    quick_follower.locator('#sent-files').get_by_text('fast-exit.txt').wait_for()
+    assert [row['bytes'] for row in quick_follower.evaluate('window.__smokeOwnFileData()')] == [list(b'content-survives')], 'rapid Leave dropped shared file bytes'
+    quick_follower.locator('#leave-room').click()
     browser.close()
-    print('PASS: same-room automatic owner-tab election, staged File retention, mirror controls, R05/R06')
+    print('PASS: source File bytes survive rapid Leave and multi-tab handoff, R05/R06')
     print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
