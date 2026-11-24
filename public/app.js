@@ -103,9 +103,182 @@ function acquireRoomTab(code) {
   });
 }
 function releaseRoomTab() {
+  closeOwnerRoomChannel();
   const lease = roomTabLease;
   roomTabLease = null;
   lease?.release();
+}
+
+// Browser-profile tabs share ONE WebSocket/P2P controller for each room.
+// Followers receive only room UI metadata over BroadcastChannel (never
+// credentials, SDP/ICE or cloud file bytes) and forward explicit UI actions.
+let ownerRoomChannel = null;
+let mirroredRoom = null;
+let roomMirrorUpdateTimer = null;
+function roomChannelName(code) { return `lan-room-view:${code}`; }
+function closeOwnerRoomChannel() {
+  if (!ownerRoomChannel) return;
+  const owner = ownerRoomChannel;
+  ownerRoomChannel = null;
+  clearInterval(owner.heartbeat);
+  if (roomMirrorUpdateTimer !== null) clearTimeout(roomMirrorUpdateTimer);
+  roomMirrorUpdateTimer = null;
+  owner.channel.postMessage({ type: 'owner-left', code: owner.code });
+  owner.channel.close();
+}
+function roomViewSnapshot() {
+  return {
+    code: state.code, name: deviceName(),
+    connected: state.ws?.readyState === WebSocket.OPEN && Boolean(state.generation),
+    roomEntry: state.lastRoomEntry,
+    peers: [...state.peers.values()].map(peer => ({
+      id: peer.id, name: peer.name, ready: peer.ready, reason: peer.reason,
+    })),
+    ownOffers: state.ownOffers.map(offer => ({
+      offerId: offer.offerId, files: offer.files.map(file => ({ ...file })),
+    })),
+    offers: [...state.offers.values()].map(offer => ({
+      peerId: offer.peerId, offerId: offer.offerId,
+      files: offer.files.map(file => ({ ...file })),
+    })),
+    jobs: state.jobs.map(job => ({
+      peerId: job.peerId, offerId: job.offerId, fileId: job.fileId,
+      name: job.name, size: job.size, received: job.received,
+      status: job.status, url: job.url || null, cancelled: job.cancelled,
+      active: state.active === job, queued: state.queue.includes(job),
+    })),
+    diagnostics: diagnosticsSnapshot(),
+    feedback: $('feedback').textContent,
+    feedbackError: $('feedback').classList.contains('error'),
+  };
+}
+function broadcastRoomView() {
+  if (!ownerRoomChannel || mirroredRoom || state.code !== ownerRoomChannel.code) return;
+  ownerRoomChannel.channel.postMessage({ type: 'snapshot', view: roomViewSnapshot() });
+}
+function scheduleRoomView() {
+  if (!ownerRoomChannel || mirroredRoom || roomMirrorUpdateTimer !== null) return;
+  roomMirrorUpdateTimer = setTimeout(() => {
+    roomMirrorUpdateTimer = null;
+    broadcastRoomView();
+  }, 120);
+}
+function sendMirrorAction(action) {
+  mirroredRoom?.channel.postMessage({ type: 'action', action });
+}
+function applyMirroredView(view) {
+  if (!mirroredRoom || view.code !== mirroredRoom.code) return;
+  mirroredRoom.view = view;
+  state.code = view.code;
+  state.lastRoomEntry = view.roomEntry;
+  state.generation = view.connected ? 'mirrored' : '';
+  state.peers = new Map(view.peers.map(peer => [peer.id, peer]));
+  state.ownOffers = view.ownOffers;
+  state.offers = new Map(view.offers.map(offer => [`${offer.peerId}:${offer.offerId}`, offer]));
+  state.jobs = view.jobs.map(job => ({ ...job, chunks: [] }));
+  state.active = state.jobs.find(job => job.active) || null;
+  state.queue = state.jobs.filter(job => job.queued);
+  currentDeviceName = view.name;
+  if ($('my-device-label').contentEditable !== 'plaintext-only') updateDeviceAvatar();
+  $('room-name').textContent = view.code;
+  $('room-code-input').value = view.code;
+  showRoom(true);
+  renderPeers();
+  renderSentFiles();
+  renderRoomFiles();
+  renderDiagnostics();
+  feedback(view.feedback || '房间信息已同步', view.feedbackError);
+}
+function closeMirroredRoom() {
+  if (!mirroredRoom) return;
+  mirroredRoom.channel.close();
+  mirroredRoom = null;
+  state.code = ''; state.generation = ''; state.lastRoomEntry = null;
+  state.id = ''; state.token = '';
+  state.peers.clear(); state.ownOffers = []; state.offers.clear();
+  state.jobs = []; state.queue = []; state.active = null;
+  showRoom(false);
+  renderPeers(); renderSentFiles(); renderRoomFiles();
+}
+async function openMirroredRoom(code) {
+  if (!window.BroadcastChannel) {
+    setEntryLoading(false);
+    feedback('当前浏览器不支持房间页面同步，请使用原标签页', true);
+    return;
+  }
+  const channel = new BroadcastChannel(roomChannelName(code));
+  mirroredRoom = { code, channel, view: null };
+  let connected = false;
+  await new Promise(resolve => {
+    const timeout = setTimeout(() => {
+      if (!connected) {
+        closeMirroredRoom();
+        setEntryLoading(false);
+        feedback('房间同步暂不可用，请刷新已打开的房间页面后重试', true);
+        resolve();
+      }
+    }, 6000);
+    channel.onmessage = ({ data }) => {
+      if (!mirroredRoom || mirroredRoom.channel !== channel) return;
+      if (data.type === 'snapshot' && data.view?.code === code) {
+        if (!connected) { connected = true; clearTimeout(timeout); resolve(); }
+        applyMirroredView(data.view);
+      } else if (data.type === 'pending' && data.code === code) {
+        if (!connected) {
+          connected = true; clearTimeout(timeout); resolve();
+          state.code = code;
+          showRoom(true);
+          $('room-name').textContent = code;
+          feedback('正在同步房间信息…');
+        }
+      } else if (data.type === 'owner-left' && data.code === code) {
+        closeMirroredRoom();
+        feedback('房间已退出，可重新进入', false);
+      }
+    };
+    channel.postMessage({ type: 'hello' });
+  });
+}
+function handleMirroredAction(action) {
+  if (!action || !ownerRoomChannel || !state.code || state.code !== ownerRoomChannel.code) return;
+  const offer = state.offers.get(`${action.peerId}:${action.offerId}`);
+  const file = offer?.files.find(item => item.id === action.fileId);
+  const job = state.jobs.find(item => item.peerId === action.peerId &&
+    item.offerId === action.offerId && item.fileId === action.fileId);
+  switch (action.kind) {
+    case 'rename':
+      saveDeviceName(action.name);
+      break;
+    case 'share':
+      if (Array.isArray(action.files)) shareFiles(action.files);
+      break;
+    case 'withdraw':
+      withdrawSharedFile(action.offerId, action.fileId);
+      break;
+    case 'accept':
+      if (offer && file && state.peers.get(offer.peerId)?.ready) acceptFile(offer, file);
+      break;
+    case 'cancel':
+      if (job) cancelJob(job);
+      break;
+    case 'retry':
+      if (job) retryJob(job);
+      break;
+  }
+}
+function startOwnerRoomChannel(code) {
+  if (!window.BroadcastChannel) return;
+  closeOwnerRoomChannel();
+  const channel = new BroadcastChannel(roomChannelName(code));
+  ownerRoomChannel = { code, channel, heartbeat: setInterval(broadcastRoomView, 4000) };
+  channel.onmessage = ({ data }) => {
+    if (data?.type === 'hello') {
+      if (state.code === code) broadcastRoomView();
+      else channel.postMessage({ type: 'pending', code });
+    } else if (data?.type === 'action') {
+      handleMirroredAction(data.action);
+    }
+  };
 }
 try { currentDeviceName = getOrCreateDeviceName(window.localStorage); }
 catch { currentDeviceName = generateDeviceName(); }
