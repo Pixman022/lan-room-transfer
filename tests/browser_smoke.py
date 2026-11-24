@@ -56,6 +56,23 @@ window.__smokeMirrorFileData = async () => {
   }
   return rows;
 };
+// Test-only partial receive: this validates browser lifecycle handoff,
+// not actual transport of file bytes over a physical LAN.
+window.__smokeStageInterruptedReceive = () => {
+  const job = {
+    peerId: 'disconnected-source', offerId: 'handoff-offer',
+    fileId: 'handoff-file', name: 'handoff-partial.bin',
+    size: 13, received: 5, chunks: [new Uint8Array([1, 2, 3, 4, 5])],
+    status: '传输中', cancelled: false, url: null,
+  };
+  state.jobs.push(job);
+  state.active = job;
+  renderRoomFiles();
+};
+window.__smokeReceiveJobs = () => state.jobs.map(job => ({
+  name: job.name, received: job.received, status: job.status,
+  recovering: job.recovering === true, cancelled: job.cancelled === true,
+}));
 """
         route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
 
@@ -266,6 +283,12 @@ window.__smokeMirrorFileData = async () => {
     assert 'mirror-stay.txt' in a.locator('#sent-files').inner_text()
     a.locator('#toggle-diagnostics').click()
     assert not errors, errors
+
+    # The outgoing transport tab may close while bytes are still buffered.
+    # Do not wait for the coalesced 120 ms room snapshot: pagehide must hand
+    # off the latest receive intent so the survivor can restart from zero.
+    a.evaluate('window.__smokeStageInterruptedReceive()')
+    assert a.evaluate('window.__smokeReceiveJobs()[0].received') == 5
     a.close()
     # Closing (not explicitly leaving) the owner tab causes takeover. Only
     # files selected by that closed tab are withdrawn.
@@ -275,6 +298,13 @@ window.__smokeMirrorFileData = async () => {
         document.getElementById('room-screen').hidden === false
     """, timeout=15000)
     assert duplicate.locator('#room-name').inner_text() == 'HOME2026'
+    duplicate.wait_for_function("""() => {
+      const job = window.__smokeReceiveJobs().find(item => item.name === 'handoff-partial.bin');
+      return job && job.recovering && job.received === 0 &&
+        job.status === '等待连接恢复后重新接收';
+    }""", timeout=15000)
+    duplicate.locator('#incoming-requests').get_by_text('handoff-partial.bin').wait_for()
+    assert duplicate.locator('#incoming-requests').get_by_role('button', name='取消').count() == 1
     duplicate.locator('#sent-files').get_by_text('smoke.txt').wait_for(state='detached')
     duplicate.locator('#sent-files').get_by_text('mirror-stay.txt').wait_for()
     assert [row['bytes'] for row in duplicate.evaluate('window.__smokeOwnFileData()')] == [list(b'keep-mirror')], 'surviving tab lost its own shared file'
