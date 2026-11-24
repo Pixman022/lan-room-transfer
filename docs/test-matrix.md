@@ -2,6 +2,17 @@
 
 ## Current acceptance gate (2026-11-23)
 
+**2026-11-24 zero-byte save observation:** The user reports that some
+devices cannot persist a 0 B downloaded file. The app's SHA-256 validation
+and the device/browser's ability to create an empty saved file are **different
+results**; the exact affected OS/browser/version has not yet been supplied,
+so do not attribute the failure to any one browser. Record 0 B as
+`app checksum PASS / physical Save unsupported or pending` where appropriate,
+**not** as a corruption of nonempty transferred bytes. Never create a local
+empty file to satisfy external-hash acceptance. Keep verifying saved 1 MiB,
+5 MiB and 64 KiB files independently; keep the 0 B saved-file outcome
+explicitly open for affected devices.
+
 This section is the **current status**; the dated sections below preserve historical
 diagnostics and do not override these gates. Verified production baseline at
 this audit's start: `6399e4d` (Render **Live**, deployed automatically from `main`; [auto-deploy
