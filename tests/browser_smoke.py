@@ -21,7 +21,11 @@ def rename(page, button, label, name):
     editor.fill(name)
     editor.press('Enter')
     assert editor.get_attribute('contenteditable') == 'false'
-    assert editor.inner_text() == name
+    # A mirrored rename may be immediately overlaid by an older owner
+    # snapshot; verify the settled rendered name, not a synchronous race.
+    page.wait_for_function(
+        '([selector, expected]) => document.querySelector(selector)?.textContent.trim() === expected',
+        arg=[label, name], timeout=10000)
 
 
 with sync_playwright() as playwright:
