@@ -92,6 +92,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-field-has
   -C0B     "D:\LANRoom\Round1\C\A_empty_0B.bin"
 ```
 
+**Zero-byte compatibility:** A verified empty (0 B) file is valid transfer
+content, but some browser/OS download flows may not create a saved empty
+file. In that case record the **device, OS, browser/version, whether the app
+displayed checksum success, and what happened when Save was tapped**. Omit
+`-C0B` rather than inventing an empty local replacement: the verifier will
+correctly print `PARTIAL`. Continue independent hashing of the nonempty
+saved files and track the empty-file **save outcome separately**. A successful
+in-app SHA-256 check alone does not prove that the file was saved. Do not
+use a newly generated empty file as evidence of a download.
+
 The user must manually confirm that the files belong to the **same run**;
 the optional run label is not verified by the script. The checker uses
 `Get-FileHash -Algorithm SHA256`, checks each fixture's exact byte count, and
