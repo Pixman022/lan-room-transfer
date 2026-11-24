@@ -2365,7 +2365,7 @@ test('reused friendly names remain editable and show distinct peer labels', () =
 
 test('secondary room view mirrors member/file jobs and delegates receive without making a socket', () => {
   const t = harness();
-  t.run("window.mirrorCommands = []; mirroredRoom = {code: '5832', channel: {postMessage(message){window.mirrorCommands.push(message)}, close(){}}}");
+  t.run("window.mirrorCommands = []; mirroredRoom = {code: '5832', savedBlobs:new Map(), savedUrls:new Map(), sources:new Map(), channel: {postMessage(message){window.mirrorCommands.push(message)}, close(){}}}");
   t.run(`applyMirroredView({
     code: '5832', name: 'Amber Fox', connected: true, roomEntry: 'joined',
     peers: [{id:'peer-b',name:'Phone',ready:true,reason:'文件直连就绪'}],
@@ -2403,7 +2403,7 @@ test('stale mirrored room blocks delegated mutations and restores controls on fr
   };
   t.run('window.mirrorCommands = []');
   // No browser WebSocket is opened for the mirrored view.
-  t.run("mirroredRoom = {code:'5832',channel:{postMessage(message){window.mirrorCommands.push(message)},close(){}}}");
+  t.run("mirroredRoom = {code:'5832', savedBlobs:new Map(), savedUrls:new Map(), sources:new Map(),channel:{postMessage(message){window.mirrorCommands.push(message)},close(){}}}");
   t.run('applyMirroredView(' + JSON.stringify(snapshot) + ')');
   assert.equal(t.elements.get('drop-zone').disabled, false);
   assert.equal(t.elements.get('edit-device-name').disabled, false);
@@ -2434,4 +2434,46 @@ test('stale mirrored room blocks delegated mutations and restores controls on fr
   t.run('closeMirroredRoom()');
   assert.equal(t.elements.get('drop-zone').disabled, false, 'leaving mirror clears the stale button state');
   assert.equal(t.FakeWebSocket.sockets.length, 0);
+});
+
+
+test('a surviving room tab claims transport ownership and retains staged files and saved downloads', async () => {
+  const t = harness();
+  t.run("window.ownerMessages = []");
+  t.run(`mirroredRoom = {
+    code: '5832',
+    session: {id:'same-member-id',token:'same-member-token'},
+    sources: new Map([['share-1',new Map([['file-1',new Blob(['source'])]])]]),
+    savedBlobs: new Map([['remote:offer-2:received',new Blob(['saved'])]]),
+    savedUrls: new Map([['remote:offer-2:received','blob:mirror-saved']]),
+    channel: {postMessage(message){window.ownerMessages.push(message)},close(){}},
+    view: {
+      code:'5832', name:'Amber Fox',roomEntry:'resumed',
+      ownOffers:[{offerId:'share-1',files:[{id:'file-1',name:'local.bin',size:6}]}],
+      jobs:[
+        {peerId:'remote',offerId:'offer-2',fileId:'received',name:'saved.bin',size:5,
+         received:5,status:'校验通过，点击保存',url:'blob:owner-saved'},
+        {peerId:'remote',offerId:'offer-2',fileId:'interrupted',name:'inflight.bin',size:5,
+         received:2,status:'传输中',active:true,url:null},
+      ],
+    },
+  }`);
+  t.run('promoteMirroredRoom(mirroredRoom)');
+  assert.equal(t.run('Boolean(mirroredRoom)'), false, 'second tab is promoted, not discarded');
+  assert.equal(t.state.code, '5832');
+  assert.equal(t.state.id, 'same-member-id');
+  assert.equal(t.state.token, 'same-member-token');
+  assert.equal(t.state.outbound.get('share-1').get('file-1').size, 6);
+  assert.equal(t.state.ownOffers[0].files[0].name, 'local.bin');
+  assert.equal(t.state.jobs[0].url, 'blob:mirror-saved',
+    'a saved download can continue using a URL owned by the surviving tab');
+  assert.equal(t.state.jobs[0].blob.size, 5);
+  assert.equal(t.state.jobs[1].status, '失败：连接已切换，请重新接收',
+    'no false resumable byte-progress guarantee');
+  assert.equal(t.state.queue.length, 0);
+  assert.equal(t.state.active, null);
+  assert.equal(t.FakeWebSocket.sockets.length, 1, 'one new socket takes over the room');
+  t.FakeWebSocket.sockets[0].open();
+  assert.deepEqual({...t.FakeWebSocket.sockets[0].sent[0]},
+    {type:'enter',code:'5832',name:'Amber Fox',id:'same-member-id',token:'same-member-token'});
 });
