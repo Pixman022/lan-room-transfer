@@ -163,8 +163,22 @@ function scheduleRoomView() {
     broadcastRoomView();
   }, 120);
 }
+function mirrorActionsUnavailable() {
+  return Boolean(mirroredRoom?.stale);
+}
+function updateMirrorControls() {
+  const unavailable = mirrorActionsUnavailable();
+  $('drop-zone').disabled = unavailable;
+  $('send-files').disabled = unavailable;
+  $('edit-device-name').disabled = unavailable;
+}
 function sendMirrorAction(action) {
-  mirroredRoom?.channel.postMessage({ type: 'action', action });
+  if (!mirroredRoom) return;
+  if (mirrorActionsUnavailable()) {
+    feedback('房间同步中断，请确认原标签页仍在运行后重试', true);
+    return;
+  }
+  mirroredRoom.channel.postMessage({ type: 'action', action });
 }
 function applyMirroredView(view) {
   if (!mirroredRoom || view.code !== mirroredRoom.code) return;
@@ -189,6 +203,7 @@ function applyMirroredView(view) {
   renderSentFiles();
   renderRoomFiles();
   renderDiagnostics();
+  updateMirrorControls();
   $('qa-panel').hidden = true;
   $('qa-enable').hidden = true;
   feedback(view.feedback || '房间信息已同步', view.feedbackError);
@@ -208,6 +223,7 @@ function closeMirroredRoom() {
   state.jobs = []; state.queue = []; state.active = null;
   showRoom(false);
   renderPeers(); renderSentFiles(); renderRoomFiles();
+  updateMirrorControls();
 }
 async function openMirroredRoom(code) {
   if (!window.BroadcastChannel) {
@@ -225,8 +241,10 @@ async function openMirroredRoom(code) {
       mirroredRoom.stale = true;
       mirroredRoom.view.connected = false;
       state.generation = '';
-      updateConnectionSummary();
-      feedback('原房间页面暂时没有同步更新，请确认原标签页仍在运行', true);
+      renderPeers();
+      renderRoomFiles();
+      updateMirrorControls();
+      feedback('房间同步中断，请确认原标签页仍在运行', true);
     }, 5000),
   };
   let connected = false;
@@ -355,6 +373,11 @@ function updateConnectionSummary() {
     status.dataset.state = 'offline';
     return;
   }
+  if (mirrorActionsUnavailable()) {
+    status.textContent = '房间同步中断';
+    status.dataset.state = 'offline';
+    return;
+  }
   if (!(mirroredRoom ? mirroredRoom.view?.connected : state.ws?.readyState === WebSocket.OPEN) ||
       !state.generation) {
     status.textContent = '正在恢复连接';
@@ -411,6 +434,10 @@ function updateDeviceAvatar() {
   $('my-device-label').textContent = deviceName();
 }
 function saveDeviceName(rawName) {
+  if (mirrorActionsUnavailable()) {
+    feedback('房间同步中断，暂时无法修改设备名称', true);
+    return null;
+  }
   const name = String(rawName ?? '').replace(/\s+/g, ' ').trim();
   if (!name || name.length > 40) {
     feedback('设备名称需要为 1–40 个字符', true);
@@ -1743,7 +1770,11 @@ function renderPeers() {
   qaRender();
 }
 function diagnosticsSnapshot() {
-  if (mirroredRoom?.view?.diagnostics) return mirroredRoom.view.diagnostics;
+  if (mirroredRoom?.view?.diagnostics) {
+    return mirrorActionsUnavailable()
+      ? { ...mirroredRoom.view.diagnostics, signal: 'unknown' }
+      : mirroredRoom.view.diagnostics;
+  }
   return {
     signal: state.ws?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
     signalErrors: state.signalErrors,
@@ -1980,6 +2011,9 @@ function renderDiagnostics() {
   const data = diagnosticsSnapshot();
   const root = $('diagnostics-content');
   root.replaceChildren();
+  if (mirrorActionsUnavailable()) {
+    root.append(elem('p', 'diagnostic-line', '原标签页已停止同步；以下为最后一次收到的诊断数据'));
+  }
   const header = elem('p', 'diagnostic-line', data.peerCount ? `设备：${data.peerCount} · 可传：${data.peers.filter(peer => peer.canTransfer).length}` : '尚无其他设备');
   root.append(header);
   root.append(elem('p', 'diagnostic-line',
@@ -2040,7 +2074,9 @@ function renderSentFiles() {
     const count = [...state.peers.values()].filter(peer => peer.ready).length;
     info.append(elem('strong', '', file.name), elem('span', '', `${humanSize(file.size)} · ${count ? `可供 ${count} 台设备接收` : '等待设备直连'}`));
     line.append(info);
-    addButton(line, '移除', () => withdrawSharedFile(file.offerId, file.id), 'quiet-button small-button');
+    const button = addButton(line, '移除',
+      () => withdrawSharedFile(file.offerId, file.id), 'quiet-button small-button');
+    button.disabled = mirrorActionsUnavailable();
     container.append(line);
   }
 }
@@ -2076,16 +2112,20 @@ function renderRoomFiles() {
     const actions = elem('div', 'job-actions');
     if (!job && file.status === 'pending') {
       const button = addButton(actions, '接收', () => acceptFile(offer, file));
-      button.disabled = !state.peers.get(offer.peerId)?.ready;
+      button.disabled = mirrorActionsUnavailable() || !state.peers.get(offer.peerId)?.ready;
     } else if (job?.url) {
       const link = elem('a', 'download-link', '保存');
       link.href = job.url;
       link.download = job.name;
       actions.append(link);
     } else if (job && (state.active === job || state.queue.includes(job))) {
-      if (!job.cancelled) addButton(actions, '取消', () => cancelJob(job), 'secondary small-button');
+      if (!job.cancelled) {
+        const button = addButton(actions, '取消', () => cancelJob(job), 'secondary small-button');
+        button.disabled = mirrorActionsUnavailable();
+      }
     } else if (job && (job.status.startsWith('失败') || job.status === '已取消')) {
-      addButton(actions, '重试', () => retryJob(job), 'secondary small-button');
+      const button = addButton(actions, '重试', () => retryJob(job), 'secondary small-button');
+      button.disabled = mirrorActionsUnavailable();
     } else if (!job) {
       actions.append(elem('span', file.status === 'complete' ? 'chip ready' : 'chip',
         ({ queued: '已加入队列', complete: '已接收', failed: '接收失败' })[file.status] || file.status));
@@ -2112,7 +2152,7 @@ function renderRoomFiles() {
       const foot = elem('div', 'request-footer');
       const button = addButton(foot, `接收全部 (${pending.length})`,
         () => pending.forEach(file => acceptFile(offer, file)), 'primary small-button');
-      button.disabled = !peer?.ready;
+      button.disabled = mirrorActionsUnavailable() || !peer?.ready;
       group.append(foot);
     }
     root.append(group);
