@@ -2661,3 +2661,27 @@ test('a canceled automatic takeover receive must not start after its source reap
   assert.equal(t.state.jobs[0].status,'已取消');
   assert.equal(t.run('window.sent.length'),0);
 });
+
+
+test('recovery re-request streams and verifies full file bytes over the existing P2P controller', async () => {
+  const t = await linkedFilePeers({realChecksum:true});
+  const bytes = new Blob(['hello']);
+  t.sender.state.outbound.set('resumed-offer',new Map([['resumed-file',bytes]]));
+  t.sender.state.ownOffers.push({offerId:'resumed-offer',
+    files:[{id:'resumed-file',name:'resume-test.bin',size:bytes.size}]});
+  t.receiver.state.jobs.push({
+    peerId:'sender',offerId:'resumed-offer',fileId:'resumed-file',
+    name:'resume-test.bin',size:bytes.size,received:0,chunks:[],
+    status:'等待连接恢复后重新接收',cancelled:false,recovering:true,url:null,
+  });
+  t.sender.run('syncSharedOffers(state.peers.get("receiver"))');
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存',4000);
+  assert.equal(t.receiver.state.jobs[0].received,bytes.size);
+  assert.equal(t.receiver.state.jobs[0].recovering,false);
+  assert.equal(t.receiver.state.jobs.length,1,'restart reuses the original job');
+  assert.equal(t.receiver.savedBlobs.length,1,'successful re-receive creates a single verified Save Blob');
+  assert.equal(await t.receiver.savedBlobs[0].text(),'hello');
+  assert.equal(t.receiver.state.jobs[0].url,'blob:test-file');
+  assert.equal(t.receiver.state.queue.length,0);
+  assert.equal(t.receiver.state.active,null);
+});
