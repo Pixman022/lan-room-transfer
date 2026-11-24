@@ -80,6 +80,31 @@ with sync_playwright() as playwright:
     assert a.locator('#send-target').count() == 0
     assert a.locator('#transfer-jobs').count() == 0
 
+    # A second tab in the SAME browser profile must not create another room
+    # member or take over A's session, even with the same saved device name.
+    duplicate = one.new_page()
+    duplicate.on('pageerror', lambda err: errors.append(str(err)))
+    duplicate.goto(ROOT)
+    assert duplicate.locator('#home-device-label').inner_text() == 'Windows Laptop'
+    duplicate.locator('#room-code-input').fill('HOME2026')
+    duplicate.locator('#enter-room').click()
+    duplicate.locator('#feedback').get_by_text(
+        '此房间已在当前浏览器的其他标签页打开，请返回原页面使用').wait_for()
+    assert duplicate.locator('#home-screen').is_visible()
+    assert duplicate.evaluate('window.__smokeWebSockets.length') == 0
+    assert a.locator('#peer-list .device-row').count() == 1
+    assert b.locator('#peer-list .device-row').count() == 1
+
+    # Holding a room-specific lock must not block a DIFFERENT room in the
+    # same browser profile.
+    other = one.new_page()
+    other.goto(ROOT)
+    other.locator('#room-code-input').fill('OTHERCODE')
+    other.locator('#enter-room').click()
+    other.locator('#room-screen').wait_for(state='visible')
+    other.locator('#leave-room').click()
+    other.close()
+
     a.locator('#toggle-diagnostics').click()
     assert a.locator('#diagnostics-panel').is_visible()
     assert a.locator('#diagnostics-content').inner_text().strip()
@@ -95,6 +120,18 @@ with sync_playwright() as playwright:
     assert a.locator('#toast-message').inner_text() == '设备名称已修改'
     b.locator('#peer-list').get_by_text('Updated Laptop').wait_for()
     assert b.locator('#peer-list').get_by_text('Windows Laptop').count() == 0
+
+    # Two genuinely independent browser profiles can intentionally have the
+    # same editable name. The room must distinguish them in the peer list.
+    rename(b, '#edit-device-name', '#my-device-label', 'Updated Laptop')
+    a.wait_for_function("""() =>
+        document.querySelector('#peer-list strong')?.textContent.startsWith('Updated Laptop · ')
+    """)
+    assert b.locator('#peer-list strong').inner_text().startswith('Updated Laptop · ')
+    rename(b, '#edit-device-name', '#my-device-label', 'Mobile Phone')
+    a.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
+    assert a.locator('#peer-list strong').inner_text() == 'Mobile Phone'
+
     for page, name in ((a, 'desktop'), (b, 'mobile')):
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), name + ' horizontal overflow'
         page.screenshot(path=str(SCREENSHOT_DIR / (name + '-ui.png')), full_page=True)
@@ -139,6 +176,12 @@ with sync_playwright() as playwright:
     assert not errors, errors
     a.locator('#leave-room').click()
     a.locator('#home-screen').wait_for(state='visible')
+    # Closing the active room releases the browser-profile lock. The formerly
+    # denied tab can now enter that room without refreshing.
+    duplicate.locator('#enter-room').click()
+    duplicate.locator('#room-screen').wait_for(state='visible')
+    assert duplicate.locator('#room-name').inner_text() == 'HOME2026'
+    duplicate.locator('#leave-room').click()
     browser.close()
-    print('PASS: local HTTP/WebSocket join, rename, file staging, R05 session resume, R06 fresh room with staged File')
+    print('PASS: browser tab room lock, duplicate-name labels, join, rename, R05 resume, R06 staged-file recovery')
     print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
