@@ -187,11 +187,15 @@ function applyMirroredView(view) {
   renderSentFiles();
   renderRoomFiles();
   renderDiagnostics();
+  $('qa-panel').hidden = true;
+  $('qa-enable').hidden = true;
   feedback(view.feedback || '房间信息已同步', view.feedbackError);
 }
 function closeMirroredRoom() {
   if (!mirroredRoom) return;
   mirroredRoom.channel.close();
+  $('qa-panel').hidden = !QA_MODE;
+  $('qa-enable').hidden = QA_MODE;
   mirroredRoom = null;
   state.code = ''; state.generation = ''; state.lastRoomEntry = null;
   state.id = ''; state.token = '';
@@ -302,6 +306,7 @@ const humanSize = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576
 function feedback(text, error = false) {
   $('feedback').textContent = text;
   $('feedback').className = error ? 'feedback error' : 'feedback';
+  scheduleRoomView();
 }
 let toastTimer = null;
 function showToast(message) {
@@ -333,7 +338,8 @@ function updateConnectionSummary() {
     status.dataset.state = 'offline';
     return;
   }
-  if (state.ws?.readyState !== WebSocket.OPEN || !state.generation) {
+  if (!(mirroredRoom ? mirroredRoom.view?.connected : state.ws?.readyState === WebSocket.OPEN) ||
+      !state.generation) {
     status.textContent = '正在恢复连接';
     status.dataset.state = 'waiting';
     return;
@@ -399,7 +405,8 @@ function saveDeviceName(rawName) {
   if (changed) {
     try { window.localStorage.setItem(DEVICE_NAME_KEY, name); }
     catch { /* Private mode may deny storage. */ }
-    if (state.code && state.ws?.readyState === WebSocket.OPEN) {
+    if (mirroredRoom) sendMirrorAction({ kind: 'rename', name });
+    else if (state.code && state.ws?.readyState === WebSocket.OPEN) {
       debugSend(state.ws, { type: 'rename', name });
     }
     renderPeers();
@@ -1383,6 +1390,12 @@ async function startSendingFile(peer, request) {
 }
 
 function acceptFile(offer, file) {
+  if (mirroredRoom) {
+    if (file.status === 'pending') sendMirrorAction({
+      kind: 'accept', peerId: offer.peerId, offerId: offer.offerId, fileId: file.id,
+    });
+    return;
+  }
   if (file.status !== 'pending') return;
   file.status = 'queued';
   const job = { peerId: offer.peerId, offerId: offer.offerId, fileId: file.id,
@@ -1428,6 +1441,10 @@ function finishJob(status) {
 }
 function failActive(reason) { if (state.active) finishJob(`失败：${reason}`); }
 function cancelJob(job) {
+  if (mirroredRoom) {
+    sendMirrorAction({ kind: 'cancel', peerId: job.peerId, offerId: job.offerId, fileId: job.fileId });
+    return;
+  }
   if (state.active === job) {
     if (job.cancelled) return;
     job.cancelled = true;
@@ -1450,6 +1467,10 @@ function cancelJob(job) {
   }
 }
 function retryJob(job) {
+  if (mirroredRoom) {
+    sendMirrorAction({ kind: 'retry', peerId: job.peerId, offerId: job.offerId, fileId: job.fileId });
+    return;
+  }
   if (!job.status.startsWith('失败') && job.status !== '已取消') return;
   const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
   const file = offer?.files.find(f => f.id === job.fileId);
@@ -1608,6 +1629,10 @@ function syncSharedOffers(peer) {
   }
 }
 function shareFiles(files) {
+  if (mirroredRoom) {
+    if (files.length) sendMirrorAction({ kind: 'share', files });
+    return;
+  }
   if (!state.code) { feedback('请先进入房间', true); return; }
   if (!files.length || files.length > MAX_FILES) { feedback('一次请选择 1–20 个文件', true); return; }
   if (files.some(file => !Number.isSafeInteger(file.size) || file.size < 0)) {
@@ -1632,6 +1657,10 @@ function shareFiles(files) {
     : ready ? '文件已加入房间共享列表' : '文件已添加，等待设备直连');
 }
 function withdrawSharedFile(offerId, fileId) {
+  if (mirroredRoom) {
+    sendMirrorAction({ kind: 'withdraw', offerId, fileId });
+    return;
+  }
   const offer = state.ownOffers.find(item => item.offerId === offerId);
   if (!offer || !offer.files.some(file => file.id === fileId)) return;
   offer.files = offer.files.filter(file => file.id !== fileId);
@@ -1677,6 +1706,7 @@ function peerDisplayName(peer) {
   return sameName > 1 ? `${peer.name} · ${peer.id.slice(-4)}` : peer.name;
 }
 function renderPeers() {
+  scheduleRoomView();
   const list = $('peer-list');
   list.replaceChildren();
   const peers = [...state.peers.values()];
@@ -1696,6 +1726,7 @@ function renderPeers() {
   qaRender();
 }
 function diagnosticsSnapshot() {
+  if (mirroredRoom?.view?.diagnostics) return mirroredRoom.view.diagnostics;
   return {
     signal: state.ws?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
     signalErrors: state.signalErrors,
@@ -1855,6 +1886,7 @@ function diagnoseIce(peer, stats) {
 // Full evidence is intentionally opt-in. Normal copy diagnostics remain redacted.
 async function buildDiagnosticsReport() {
   const summary = diagnosticsSnapshot();
+  if (mirroredRoom) return summary;
   if (!FULL_DEBUG) {
     // Include ICE evidence without exposing raw SDP, IP addresses or room credentials.
     const peers = await Promise.all([...state.peers.values()].map(async (peer, index) => {
@@ -1925,6 +1957,7 @@ async function buildDiagnosticsReport() {
   };
 }
 function renderDiagnostics() {
+  scheduleRoomView();
   const panel = $('diagnostics-panel');
   if (panel.hidden) return;
   const data = diagnosticsSnapshot();
@@ -1978,6 +2011,7 @@ $('copy-diagnostics').addEventListener('click', async () => {
   }
 });
 function renderSentFiles() {
+  scheduleRoomView();
   const container = $('sent-files');
   container.replaceChildren();
   const shared = state.ownOffers.flatMap(offer => offer.files.map(file => ({ ...file, offerId: offer.offerId })));
@@ -1994,6 +2028,7 @@ function renderSentFiles() {
   }
 }
 function renderRoomFiles() {
+  scheduleRoomView();
   const root = $('incoming-requests');
   root.replaceChildren();
   const offers = [...state.offers.values()];
@@ -2160,10 +2195,10 @@ $('enter-room').onclick = async () => {
     const code = normalizeRoomCode(codeInput.value);
     setEntryLoading(true);
     if (!await acquireRoomTab(code)) {
-      setEntryLoading(false);
-      feedback('此房间已在当前浏览器的其他标签页打开，请返回原页面使用', true);
+      await openMirroredRoom(code);
       return;
     }
+    startOwnerRoomChannel(code);
     const action = { type: 'enter', code, name: deviceName() };
     const session = remembered();
     if (session?.code === code) { action.id = session.id; action.token = session.token; }
@@ -2175,6 +2210,11 @@ $('enter-room').onclick = async () => {
   }
 };
 $('leave-room').onclick = () => {
+  if (mirroredRoom) {
+    closeMirroredRoom();
+    feedback('已关闭此房间视图，其他标签页仍保持连接');
+    return;
+  }
   if (state.active && !confirm('当前有文件正在传输，退出将中断此任务。确定退出？')) return;
   state.leaving = true;
   stopReconnect();
