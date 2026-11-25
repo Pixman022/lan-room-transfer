@@ -558,18 +558,10 @@ window.__smokeStageVerifiedDownload = async (name, bytes) => {
         page.locator('#home-screen').wait_for(state='visible')
     outside.locator('#peer-list .device-row').wait_for(state='hidden')
     assert outside.locator('#room-screen').is_visible()
-    outside.locator('#leave-room').click()
-    for page in (group_a, group_b, group_c, outside):
-        page.close()
-
-    # Exercise the actual Chromium download action for verified local Blobs.
-    # This does not simulate WebRTC or establish Android/iOS Save support.
-    save_page = one.new_page()
-    save_page.on('pageerror', lambda err: errors.append(str(err)))
-    save_page.goto(ROOT)
-    save_page.locator('#room-code-input').fill('SAVETEST')
-    save_page.locator('#enter-room').click()
-    save_page.locator('#room-screen').wait_for(state='visible')
+    # Test on the already-joined independent profile. Starting one more
+    # room at the end of this long smoke can hit the intended join-rate cap.
+    # These are browser-verified local Blobs, not actual WebRTC transfer bytes.
+    save_page = outside
     for name, data in [('save-normal-5B.bin', b'hello'), ('save-empty-0B.bin', b'')]:
         staged = save_page.evaluate(
             '([name, bytes]) => window.__smokeStageVerifiedDownload(name, bytes)',
@@ -594,8 +586,9 @@ window.__smokeStageVerifiedDownload = async (name, bytes) => {
         saved_bytes = Path(download.path()).read_bytes()
         assert saved_bytes == data, f'Chromium Save produced incorrect bytes: {name}'
         assert hashlib.sha256(saved_bytes).hexdigest() == staged['sha256']
-    save_page.locator('#leave-room').click()
-    save_page.close()
+    outside.locator('#leave-room').click()
+    for page in (group_a, group_b, group_c, outside):
+        page.close()
     assert not errors, errors
     browser.close()
     print('PASS: Chromium Save produces verified nonempty and 0-byte downloads with independent file hashes')
