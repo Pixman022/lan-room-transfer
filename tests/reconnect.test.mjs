@@ -2685,3 +2685,85 @@ test('recovery re-request streams and verifies full file bytes over the existing
   assert.equal(t.receiver.state.queue.length,0);
   assert.equal(t.receiver.state.active,null);
 });
+
+test('T03: first handoff auto-receive hits a still-busy sender, then succeeds without a manual retry', async () => {
+  const t=await linkedFilePeers({realChecksum:true});
+  const bytes=new Blob(['verified payload after takeover']);
+  t.sender.state.outbound.set('recover-offer',new Map([['recover-file',bytes]]));
+  t.sender.state.ownOffers.push({offerId:'recover-offer',
+    files:[{id:'recover-file',name:'recover.bin',size:bytes.size}]});
+  // The previous transfer's sender task may still be unwinding when the
+  // replacement receiver's freshly verified DataChannel requests this file.
+  t.a.sending.set('recover-file',{cancelled:false});
+  t.receiver.state.jobs.push({peerId:'old-sender',offerId:'recover-offer',
+    fileId:'recover-file',name:'recover.bin',size:bytes.size,received:5,
+    chunks:[],status:'等待连接恢复后重新接收',cancelled:false,recovering:true,url:null});
+  t.sender.run('syncSharedOffers(state.peers.get("receiver"))');
+  await flushUntil(()=>t.senderMessages.some(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='file-error'));
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('自动重试'));
+  assert.equal(t.receiver.state.jobs.length,1);
+  assert.equal(t.receiver.state.jobs[0].received,0);
+  assert.equal(t.receiver.state.jobs[0].url,null);
+  t.a.sending.delete('recover-file');
+  const retry=[...t.receiver.timers.entries()].find(([,timer])=>timer.ms===2000);
+  assert.ok(retry,'only a handoff receive may schedule this bounded retry');
+  t.receiver.timers.delete(retry[0]);
+  retry[1].cb();
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存',4000);
+  assert.equal(t.receiver.state.jobs.length,1);
+  assert.equal(t.receiver.savedBlobs.length,1);
+  assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(bytes));
+});
+
+test('T03: auto-retries are bounded and Cancel while waiting prevents the next request', async () => {
+  const t=await linkedFilePeers();
+  const bytes=new Blob(['hello']);
+  t.sender.state.outbound.set('recover-offer',new Map([['recover-file',bytes]]));
+  t.sender.state.ownOffers.push({offerId:'recover-offer',
+    files:[{id:'recover-file',name:'recover.bin',size:bytes.size}]});
+  t.a.sending.set('recover-file',{cancelled:false});
+  t.receiver.state.jobs.push({peerId:'old-sender',offerId:'recover-offer',
+    fileId:'recover-file',name:'recover.bin',size:bytes.size,received:1,
+    chunks:[],status:'等待连接恢复后重新接收',cancelled:false,recovering:true,url:null});
+  t.sender.run('syncSharedOffers(state.peers.get("receiver"))');
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('自动重试'));
+  const first=[...t.receiver.timers.entries()].find(([,timer])=>timer.ms===2000);
+  assert.ok(first);
+  t.receiver.timers.delete(first[0]);first[1].cb();
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('自动重试') &&
+    t.receiver.run('state.jobs[0].handoffRetryCount')===2);
+  const second=[...t.receiver.timers.entries()].find(([,timer])=>timer.ms===5000);
+  assert.ok(second,'second retry must be delayed and bounded');
+  t.receiver.run('cancelJob(state.jobs[0])');
+  assert.equal(t.receiver.state.jobs[0].status,'已取消');
+  assert.equal(t.receiver.timers.has(second[0]),false,'cancel removes scheduled retry');
+  const sent=t.receiverMessages.filter(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='request-file').length;
+  second[1].cb();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(t.receiverMessages.filter(x=>typeof x==='string' &&
+    JSON.parse(x).kind==='request-file').length,sent);
+});
+
+test('T03: normal downloads and unsafe-route errors never auto-retry', async () => {
+  const t=await linkedFilePeers();
+  const bytes=new Blob(['hello']);
+  t.sender.state.outbound.set('offer-a',new Map([['f1',bytes]]));
+  t.receiver.state.offers.set('sender:offer-a',{peerId:'sender',offerId:'offer-a',
+    files:[{id:'f1',name:'original.bin',size:bytes.size,status:'pending'}]});
+  t.a.sending.set('f1',{cancelled:false});
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-a"),state.offers.get("sender:offer-a").files[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0].status.startsWith('失败：'));
+  assert.equal([...t.receiver.timers.values()].some(x=>x.ms===2000||x.ms===5000),false);
+  t.receiver.state.jobs[0].fromHandoff=true;
+  t.receiver.run('retryJob(state.jobs[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0].status.startsWith('失败：'));
+  assert.equal([...t.receiver.timers.values()].some(x=>x.ms===2000||x.ms===5000),false,
+    'manual retry does not inherit auto-retry privilege');
+  t.receiver.run("state.jobs[0].fromHandoff=true; state.jobs[0].handoffRetryCount=0");
+  t.receiver.state.jobs[0].status='等待发送端';
+  t.receiver.state.active=t.receiver.state.jobs[0];
+  t.receiver.run("failActive('文件启动前路径检查失败（unsafe-route）')");
+  assert.match(t.receiver.state.jobs[0].status,/unsafe-route/);
+  assert.equal([...t.receiver.timers.values()].some(x=>x.ms===2000||x.ms===5000),false);
+});
