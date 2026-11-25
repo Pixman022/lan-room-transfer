@@ -25,6 +25,20 @@ let signalKeepalivePending = null;
 let signalKeepaliveSequence = 0;
 const signalHealth = { sent: 0, acksReceived: 0, timeouts: 0, disconnects: 0, reconnectsScheduled: 0,
   lastDisconnect: null };
+// This short, tab-local event order is safer than sharing full debug logs.
+// In particular, it distinguishes a new "created" room from "resumed" after
+// an idle disconnect without exposing room/session identifiers or IPs.
+const signalHistory = [];
+function noteSignalTransition(event, value) {
+  const entering = event === 'entry';
+  const allowed = entering ? ['created', 'resumed', 'joined']
+    : ['socket-close', 'keepalive-timeout', 'keepalive-send-failed'];
+  signalHistory.push({
+    event: entering ? 'entry' : 'disconnect',
+    value: allowed.includes(value) ? value : 'other',
+  });
+  if (signalHistory.length > 12) signalHistory.shift();
+}
 const TRANSFER_IDLE_MS = 30000;
 const FULL_DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search || '');
 let QA_MODE = /(?:^|[?&])qa=1(?:&|$)/.test(location.search || '');
@@ -760,6 +774,7 @@ function connect(action) {
       signalHealth.lastDisconnect = reason;
     }
     signalHealth.disconnects += 1;
+    noteSignalTransition('disconnect', reason);
     state.ws = null;
     qaCancelPlan();
     const wasJoined = Boolean(state.code);
@@ -856,6 +871,7 @@ async function handleServer(msg) {
       stopReconnect();
       reconnectAttempts = 0;
       state.code = msg.code; state.id = msg.id; state.token = msg.token; state.generation = msg.generation;
+      noteSignalTransition('entry', state.lastRoomEntry);
       trace('room.joined', { roomCode: state.code, id: state.id, token: state.token,
         generation: state.generation, peers: msg.peers, resumed: restored });
       rememberRoom(); showRoom(true); $('room-name').textContent = msg.code;
@@ -2165,6 +2181,7 @@ function diagnosticsSnapshot() {
     },
     peerCount: state.peers.size,
     roomEntry: state.lastRoomEntry,
+    signalHistory: signalHistory.slice(),
     localSharedFiles: state.ownOffers.reduce((n, offer) => n + offer.files.length, 0),
     visibleRemoteFiles: [...state.offers.values()].reduce((n, offer) => n + offer.files.length, 0),
     receive: {
