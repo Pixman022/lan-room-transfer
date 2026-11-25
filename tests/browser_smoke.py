@@ -323,8 +323,10 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
     """, timeout=15000)
     assert '房间进入：created' in a.locator('#diagnostics-content').inner_text()
     assert a.locator('#room-name').inner_text() == 'HOME2026'
-    assert a.locator('#sent-files .file-row').count() == 2
+    assert a.locator('#sent-files .file-row').count() == 4
     assert 'smoke.txt' in a.locator('#sent-files').inner_text()
+    assert 'mirror-exit.txt' in a.locator('#sent-files').inner_text()
+    assert 'third-tab-kept.txt' in a.locator('#sent-files').inner_text()
     assert 'mirror-stay.txt' in a.locator('#sent-files').inner_text()
     a.locator('#toggle-diagnostics').click()
     assert not errors, errors
