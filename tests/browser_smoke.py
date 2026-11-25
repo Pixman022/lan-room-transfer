@@ -77,15 +77,6 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
   name: job.name, received: job.received, status: job.status,
   recovering: job.recovering === true, cancelled: job.cancelled === true,
 }));
-// Simulate browsers that discard a pagehide BroadcastChannel message.
-window.__smokeDropTabLeftNotice = () => {
-  if (!mirroredRoom) throw new Error('expected mirrored tab');
-  const channel = mirroredRoom.channel;
-  const send = channel.postMessage.bind(channel);
-  channel.postMessage = message => {
-    if (message?.type !== 'tab-left') send(message);
-  };
-};
 """
         route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
 
@@ -223,8 +214,8 @@ window.__smokeDropTabLeftNotice = () => {
     a.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert a.locator('#peer-list strong').inner_text() == 'Mobile Phone'
 
-    # T02: three tabs from one Chrome profile share one room member.
-    # A holds the transport; B is about to close; C must keep its source.
+    # New T04: three tabs from one Chrome profile share one device's file shelf.
+    # A holds the transport; closing B/C must NOT withdraw any shared file.
     sibling = one.new_page()
     sibling.on('pageerror', lambda err: errors.append(str(err)))
     sibling.goto(ROOT)
@@ -239,27 +230,33 @@ window.__smokeDropTabLeftNotice = () => {
     })
     a.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for()
 
-    # Closing follower B must withdraw only its shares, not C's or A's.
+    # Closing follower B must keep its File in the one logical device's shelf.
     with duplicate.expect_file_chooser() as local_chooser:
         duplicate.locator('#drop-zone').click()
     local_chooser.value.set_files({
         'name':'mirror-exit.txt', 'mimeType':'text/plain', 'buffer':b'local-follower',
     })
     a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
-    # T02 stress case: the follower disappears without a reliable pagehide
-    # notification. Owner must reap that tab's stale shares independently.
-    duplicate.evaluate('window.__smokeDropTabLeftNotice()')
+    # Browser close cannot revoke a share already replicated to the owner.
     duplicate.close()
-    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for(state='detached', timeout=15000)
+    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
     a.locator('#sent-files').get_by_text('smoke.txt').wait_for()
     a.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for()
+    # Cross the old 4-second follower-source liveness poll boundary: old
+    # behavior reaped B's file even if its pagehide notice was discarded.
+    a.wait_for_timeout(5500)
+    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
+    assert [row['bytes'] for row in a.evaluate('window.__smokeOwnFileData()')] == [
+        list(b'hello'), list(b'c-survives'), list(b'local-follower'),
+    ]
     assert sibling.locator('#room-screen').is_visible()
     assert a.locator('#room-screen').is_visible()
     assert b.locator('#room-screen').is_visible()
     assert a.evaluate('window.__smokeWebSockets.length') == 1
     assert sibling.evaluate('window.__smokeWebSockets.length') == 0
     sibling.close()
-    a.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for(state='detached')
+    a.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for()
+    a.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
     duplicate = one.new_page()
     duplicate.on('pageerror', lambda err: errors.append(str(err)))
     duplicate.goto(ROOT)
@@ -361,9 +358,13 @@ window.__smokeDropTabLeftNotice = () => {
     }""", timeout=15000)
     duplicate.locator('#incoming-requests').get_by_text('handoff-partial.bin').wait_for()
     assert duplicate.locator('#incoming-requests').get_by_role('button', name='取消').count() == 1
-    duplicate.locator('#sent-files').get_by_text('smoke.txt').wait_for(state='detached')
+    duplicate.locator('#sent-files').get_by_text('smoke.txt').wait_for()
+    duplicate.locator('#sent-files').get_by_text('third-tab-kept.txt').wait_for()
+    duplicate.locator('#sent-files').get_by_text('mirror-exit.txt').wait_for()
     duplicate.locator('#sent-files').get_by_text('mirror-stay.txt').wait_for()
-    assert [row['bytes'] for row in duplicate.evaluate('window.__smokeOwnFileData()')] == [list(b'keep-mirror')], 'surviving tab lost its own shared file'
+    assert [row['bytes'] for row in duplicate.evaluate('window.__smokeOwnFileData()')] == [
+        list(b'hello'), list(b'c-survives'), list(b'local-follower'), list(b'keep-mirror'),
+    ], 'transport takeover must preserve EVERY original tab share as a usable File'
     duplicate.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert duplicate.locator('#connection-status').inner_text() in (
         '直连未就绪', '文件直连就绪',
