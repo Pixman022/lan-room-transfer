@@ -2067,7 +2067,7 @@ test('R05: redacted bounded signal history distinguishes consecutive joined and 
     'Private Display Name','192.168.1.4']) {
     assert.equal(text.includes(secret),false,'ordinary timeline must never expose room or identity details');
   }
-  t.run(`for(let i=0;i<25;i++) noteSignalTransition('disconnect',
+  t.run(`for(let i=0;i<26;i++) noteSignalTransition('disconnect',
     i%2===0 ? 'keepalive-timeout' : 'sensitive 192.168.1.4 SECRET-SESSION-TOKEN')`);
   const bounded=t.run('diagnosticsSnapshot().signalHistory');
   assert.equal(bounded.length,12,'diagnostic events must remain strictly bounded');
