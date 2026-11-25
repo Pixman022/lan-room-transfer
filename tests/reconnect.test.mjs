@@ -93,7 +93,9 @@ function harness({debug = false, realRoutePolicy = false, realChecksum = false, 
     close() { this.connectionState = 'closed'; this.signalingState='closed'; }
   }
   const context = vm.createContext({
-    window: { localStorage: sessionStorage, addEventListener() {} },
+    window: { localStorage: sessionStorage,
+      addEventListener(type, callback) { (this.handlers ??= {})[type] = callback; },
+    },
     document: {
       getElementById: element,
       createElement: tag => element(Symbol(tag)),
@@ -2514,26 +2516,52 @@ test('surviving tab File handoff remains authoritative without a newer UI snapsh
 });
 
 
-test('a tab leaving withdraws its own files without removing independent tabs shares', () => {
-  const t = harness();
-  t.run(`state.code='5832';
+test('T04-new: closing one follower tab keeps all replicated device file offers', () => {
+  const t=harness();
+  t.run(`window.events=[];
+    globalThis.BroadcastChannel = class {
+      constructor(name){this.name=name}
+      postMessage(message){window.events.push(message)}
+      close(){}
+    };
+    window.BroadcastChannel=globalThis.BroadcastChannel;
+    state.code='5832';
     state.ownOffers=[
-      {offerId:'from-primary',ownerTabId:localRoomTabId,files:[{id:'a',name:'a.bin',size:4}]},
-      {offerId:'from-mirror',ownerTabId:'other-tab',files:[{id:'b',name:'b.bin',size:3}]},
+      {offerId:'from-A',ownerTabId:localRoomTabId,files:[{id:'a',name:'a.txt',size:1}]},
+      {offerId:'from-B',ownerTabId:'tab-B',files:[{id:'b',name:'b.txt',size:1}]},
+      {offerId:'from-C',ownerTabId:'tab-C',files:[{id:'c',name:'c.txt',size:1}]},
     ];
     state.outbound=new Map([
-      ['from-primary',new Map([['a',new Blob(['aaaa'])]])],
-      ['from-mirror',new Map([['b',new Blob(['bbb'])]])],
+      ['from-A',new Map([['a',new Blob(['A'])]])],
+      ['from-B',new Map([['b',new Blob(['B'])]])],
+      ['from-C',new Map([['c',new Blob(['C'])]])],
     ]);
-    withdrawTabShares(localRoomTabId);`);
-  assert.deepEqual([...t.state.ownOffers].map(x=>x.offerId), ['from-mirror']);
-  assert.deepEqual([...t.state.outbound.keys()], ['from-mirror']);
-  t.run("withdrawTabShares('other-tab')");
-  assert.equal(t.state.ownOffers.length, 0);
-  assert.equal(t.state.outbound.size, 0);
+    startOwnerRoomChannel('5832');
+    ownerRoomChannel.channel.onmessage({data:{type:'tab-left',code:'5832',tabId:'tab-C'}})`);
+  assert.deepEqual([...t.state.ownOffers].map(x=>x.offerId), ['from-A','from-B','from-C']);
+  assert.deepEqual([...t.state.outbound.keys()], ['from-A','from-B','from-C']);
+  assert.equal(t.state.outbound.get('from-C').get('c').size,1,
+    'closing the selecting tab must not invalidate its room-shared Blob');
+  // An explicit removal still withdraws only that selected file.
+  t.run("withdrawSharedFile('from-C','c')");
+  assert.deepEqual([...t.state.outbound.keys()], ['from-A','from-B']);
 });
 
-test('surviving tab takes over room but never inherits departed tabs source files', () => {
+test('T04-new: closing the transport-holding tab keeps that tab shared files in the room', () => {
+  const t=harness();
+  t.run(`window.events=[];state.code='5832';
+    ownerRoomChannel={code:'5832',channel:{postMessage(msg){window.events.push(msg)},close(){}}};
+    state.ownOffers=[{offerId:'owned-by-A',ownerTabId:localRoomTabId,
+      files:[{id:'a',name:'a.txt',size:1}]}];
+    state.outbound=new Map([['owned-by-A',new Map([['a',new Blob(['A'])]])]]);
+    window.handlers.pagehide()`);
+  assert.equal(t.state.ownOffers.length,1);
+  assert.equal(t.state.outbound.get('owned-by-A')?.get('a')?.size,1);
+  assert.ok(t.run("window.events.some(event=>event.type==='handoff')"),
+    'the outgoing controller should enqueue its existing shared File handles to siblings');
+});
+
+test('T04-new: promoted tab retains every replicated file, including departed tab sources', () => {
   const t = harness();
   t.run(`mirroredRoom = {
     code:'5832',transportTabId:'tab-A',
@@ -2555,8 +2583,10 @@ test('surviving tab takes over room but never inherits departed tabs source file
     },
   }`);
   t.run("promoteMirroredRoom(mirroredRoom)");
-  assert.deepEqual([...t.state.ownOffers].map(o=>o.offerId), ['from-B','from-C']);
-  assert.deepEqual([...t.state.outbound.keys()], ['from-B','from-C']);
+  assert.deepEqual([...t.state.ownOffers].map(o=>o.offerId), ['from-A','from-B','from-C']);
+  assert.deepEqual([...t.state.outbound.keys()], ['from-A','from-B','from-C']);
+  assert.equal(t.state.outbound.get('from-A')?.get('A-file')?.size,10,
+    'replicated File remains available after the selecting transport tab closes');
   assert.equal(t.FakeWebSocket.sockets.length,1,'room transport reconnect remains enabled');
 });
 
@@ -2614,7 +2644,8 @@ test('closing a mirrored view never sets the deliberate room-exit marker', () =>
       watchdog:null,
     };
     closeMirroredRoom();`);
-  assert.equal(t.run("window.events.filter(x => x.type === 'tab-left').length"), 1);
+  assert.equal(t.run("window.events.filter(x => x.type === 'tab-left').length"), 0,
+    'normal tab close must not announce source withdrawal');
   assert.equal(t.run("window.events.filter(x => x.type === 'leave-all').length"), 0);
   assert.equal(t.run("readRoomExitRevision('5832')"), '');
 });
