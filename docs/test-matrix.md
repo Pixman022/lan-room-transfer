@@ -1,22 +1,50 @@
 # POC field test matrix
 
+## Current evidence summary — 2026-11-25
+
+**Verified deployed baseline:** GitHub `main` commit `466959208d7cb8b41f03f67b3a734158de4980c0` from [PR #70](https://github.com/Pixman022/lan-room-transfer/pull/70); [post-merge CI #45565438897](https://github.com/Pixman022/lan-room-transfer/actions/runs/45565438897) passed both unit/browser jobs; Render deploy `dep-dc38heg473hc73fdvip0` is **Live** at that commit. This proves the controlled code/deployment baseline, not all physical network paths.
+
+| Priority / evidence gate | Verified so far | Still needed — do not repeat work already passed |
+| --- | --- | --- |
+| **Completed: same-profile multi-tab T01–T05** ([#55](https://github.com/Pixman022/lan-room-transfer/issues/55)) | **5/5 physical PASS** under the original T04 contract; T03 user-confirmed recovered file successfully saved | Historical test accepted and issue closed |
+| **Completed: new device-owned file shelf T04** ([#69](https://github.com/Pixman022/lan-room-transfer/issues/69)) | After `46695920`, user answered **“测试通过”** to closing C without file withdrawal, D saving the original C file, closing transport A and D saving the original A file after takeover | New T04 physical acceptance PASS; issue closed. No durable storage claim after all tabs close; no independent saved-file hash submitted for these specific receipts |
+| **P1: HASH-01 / MULTI-03** ([#21](https://github.com/Pixman022/lan-room-transfer/issues/21), [#26](https://github.com/Pixman022/lan-room-transfer/issues/26)) | Synchronized A→B/A→C/B→A received and passed app SHA; C's sequential Receive All and Save passed; on **2026-11-24**, Windows PowerShell 5.1 checker reported **5/5 fixture SHA-256 and byte lengths MATCH** for explicit A/B/C receiver-labelled file paths | **Provenance only:** operator to affirm all five were actual downloaded receipts (not source/fixture copies) and which belong to the same successful synchronized run. Do **not** rerun the completed hashes merely to fill this gap |
+| **P1: R06 solo unexpected network loss** ([#19](https://github.com/Pixman022/lan-room-transfer/issues/19)) | Signal-only keepalive/watchdog and real Chromium deliberate socket-close/re-create tests pass | **Real physical test:** A is the sole member; stage one harmless file; keep the same tab open through a long enough actual network interruption for the server to detect the old room's closure; restore network; confirm fresh `roomEntry:created` and still-present local File. Quick outages that `resumed` are a different valid case |
+| **P2: R05 multi-peer reconnect** ([#17](https://github.com/Pixman022/lan-room-transfer/issues/17)) | **6/6 user-reported physical functional PASS** including post-recovery B↔C and C↔B saved files; one B ordinary diagnostic reports `roomEntry:resumed` and verified P2P transfers | One structured field said `joined` while the JSON said `resumed`. Clarify **when** each was observed; retain identity/provenance gate without demanding another already-passed transfer run |
+| **P2: size, zero-byte Save, browser and restricted network** | 33 MiB complete-file automated test and route-policy tests pass; 0 B app SHA can pass and one earlier C Save succeeded | Real transfer & independently saved file hash for sizes **over 32 MiB** not established. Other device(s) reportedly could not persist a 0 B download: record browser/OS and exact Save outcome, do not fabricate a 0 B file. Cross-network VPN/guest-Wi-Fi and browser matrix remain field pending |
+| **Deferred** ([ICE #6](https://github.com/Pixman022/lan-room-transfer/issues/6)) | Existing 2+2 ICE policy and restricted verified-P2P route checks remain deployed | No ICE retuning, no TURN/relay/file-cloud fallback in this phase |
+
+**Important boundaries:** A `roomEntry` snapshot is not a full event timeline. A successful in-app SHA-256 or saved-file checker **does not establish which browser saved the file or which physical run produced it**. Real-source files are neither stored in nor uploaded to the public signalling service. Large/zero-byte compatibility and physical LAN-only guarantees are not solved by the multi-tab acceptance.
+
+## Next field evidence — minimal steps, no redundant reruns
+
+**HASH-01 provenance (no new transfer or hash computation required):** For the five already-matching 2026-11-24 PowerShell result slots `A-from-B`, `B-from-A`, `C-5MiB`, `C-64KiB`, `C-0B`, confirm from the operator's download/source history which are **actually browser-saved receipts** (not copies of originals or manually created empty files), and which belong to the **same synchronized three-device run**. An answer can explicitly mark uncertain/mixed-run slots. If provenance cannot be established, retain `PARTIAL` acceptance rather than requesting the hashes again or guessing. This test does not require uploading files or exposing local paths.
+
+**R06 sole-member real network-loss test:**
+1. On one real computer/browser, close old LAN Room tabs, open one fresh tab and enter a unique room code as the **only** online member. Select a harmless small `R06.txt` file, confirm that the file is staged and `peerCount:0`. Keep the page foreground/open throughout (do **not** press Leave or refresh).
+2. Copy an initial **ordinary redacted** diagnostic. Disable the real device network connection (Wi-Fi or Ethernet), rather than closing the tab or merely simulating a WebSocket close in developer tools. Leave it disconnected long enough that the server can **detect the now-empty room**; native WebSocket and OS timers may delay this, so there is no guaranteed wall-clock deadline.
+3. Restore connectivity, still without refreshing/Leave. Observe whether the page automatically returns to its room and the original file remains staged. Copy a second ordinary diagnostic with `signal`, `signalKeepalive`, `roomEntry`, `localSharedFiles` and `peerCount`.
+4. **PASS for the strict R06 empty-room recreation:** an actual disconnect/recovery occurs, the old room was closed, `roomEntry:created` on auto-return, and the original `R06.txt` is still present with `localSharedFiles:1`. If `roomEntry:resumed`, the old room survived the interruption: **not a failure of valid reconnect**, but **inconclusive for the empty-room teardown gate**. If no disconnect was recorded or the tab was background-throttled, record `INCONCLUSIVE`. If the file disappears or re-entry requires manual action, record `FAIL` and collect the two ordinary reports. Never share `?debug=1` output with private SDP/IP/session credentials.
+
+**R05 identity clarification only:** Existing six-step reconnect/save test is user-confirmed PASS. One checked field said `joined` and a subsequently pasted normal JSON said `resumed`; identify when each was copied or whether they came from separate reconnects. Do **not** rerun the successful transfer merely for this wording.
+
 ## Same-profile multi-tab acceptance update (2026-11-25)
 
 **Original T01–T05 physical matrix: 5/5 PASS** under the original `4fcb61a3` rules, documented in [Issue #55](https://github.com/Pixman022/lan-room-transfer/issues/55) (closed as historically complete). T04 user report: Chrome A/B/C listed as one device on Android D; closing C withdrew only C's shared file; A/B remained in the room and D received and saved B's shared file. T03 interrupted receive was also user-confirmed successfully saved on physical devices, but its externally independently computed SHA-256 was not supplied.
 
-**Revised requirement (new independent acceptance):** The user wants all same-profile room tabs treated as **one device's shared file shelf**, so closing a single tab must **not** withdraw its files. Track [Issue #69](https://github.com/Pixman022/lan-room-transfer/issues/69). This is an intentional change from old T04 and is **not a failed original T04**.
+**Revised requirement — now physically ACCEPTED:** All same-profile room tabs are **one device's shared file shelf**, so closing a single tab must **not** withdraw its files. [Issue #69](https://github.com/Pixman022/lan-room-transfer/issues/69) was completed after the user confirmed the new real PC/Android T04 test passed on `46695920`. This intentionally supersedes old T04's expected withdrawal; the original old-rule T04 remains historically PASS.
 
 | Case | New expected outcome | Status |
 | --- | --- | --- |
-| T04-new-C | A/B/C each share uniquely named files; Android D sees one logical desktop device. Close C without Leave; C's file **remains** alongside A/B. D must receive and save **C's original file** without reselecting it | Code + simulated controller/browser checks in progress; **physical retest pending** |
-| T04-new-A | With a surviving same-profile tab open, close transport holder A; survivor takes over and D can still receive and save an original A-selected file | Code + simulated controller/browser checks in progress; **physical retest pending** |
-| T05 invariant | Explicit Leave on any of A/B/C exits the whole same-profile logical device and withdraws its files; D stays in the room | Previously user-confirmed PASS; regression required |
-| Remove invariant | Explicit Remove still withdraws only the chosen shared file from the device-wide shelf | Previously implemented; regression required |
+| T04-new-C | A/B/C each share uniquely named files; Android D sees one logical desktop device. Close C without Leave; C's file **remains** alongside A/B. D must receive and save **C's original file** without reselecting it | Automated controller/Chromium checks PASS; **2026-11-25 physical T04-new PASS** (user-confirmed) |
+| T04-new-A | With a surviving same-profile tab open, close transport holder A; survivor takes over and D can still receive and save an original A-selected file | Automated controller/Chromium checks PASS; **2026-11-25 physical T04-new PASS** (user-confirmed) |
+| T05 invariant | Explicit Leave on any of A/B/C exits the whole same-profile logical device and withdraws its files; D stays in the room | Previously user-confirmed PASS; automated Leave regression also passed |
+| Remove invariant | Explicit Remove still withdraws only the chosen shared file from the device-wide shelf | Implemented; explicit per-file Remove regression passed |
 | Last tab | Closing last browser tab ends that local participant; no durable file/room persistence guarantee | Intended scope, not persistent storage |
 
 No file content is uploaded to the public signalling server. The device's File/Blob references are shared only between surviving same-origin room tabs. Source handles unavailable to every surviving tab cannot be guaranteed after the original tab exits. Large files remain subject to browser/available-memory limits. ICE reliability [Issue #6](https://github.com/Pixman022/lan-room-transfer/issues/6) remains **deferred**, and no ICE policy changes belong to this work.
 
-## Current acceptance gate (2026-11-23)
+## Historical acceptance gate (2026-11-23; superseded by current summary above)
 
 **2026-11-24 zero-byte save observation:** The user reports that some
 devices cannot persist a 0 B downloaded file. The app's SHA-256 validation
