@@ -23,7 +23,7 @@ function harness({debug = false, realRoutePolicy = false, realChecksum = false, 
       elements.set(id, {
         hidden: id === 'room-screen' || id === 'diagnostics-panel',
         textContent: '', value: '', className: '', dataset: {}, style: {}, handlers: {},
-        classList: { add() {}, remove() {} },
+        classList: { add() {}, remove() {}, contains() { return false; } },
         append() {}, replaceChildren() {},
         addEventListener(type, callback) { (this.handlers[type] ??= []).push(callback); },
         emit(type, event = {}) { for (const handler of this.handlers[type] ?? []) handler(event); },
