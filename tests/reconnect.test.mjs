@@ -2881,3 +2881,74 @@ test('T03: a newly created same-code room does not revive an absent remote sende
   assert.equal(job.recovering,false);
   assert.match(job.status,/失败：原房间已关闭/);
 });
+
+
+test('terminal receive diagnostics distinguish complete file-end, missing chunks, and an ignored end', async () => {
+  const t=await linkedFilePeers();
+  const content=new Blob(['complete byte stream']);
+  t.sender.state.outbound.set('offer-end',new Map([['file-end-test',content]]));
+  t.receiver.state.offers.set('sender:offer-end',{peerId:'sender',offerId:'offer-end',
+    files:[{id:'file-end-test',name:'payload.bin',size:content.size,status:'pending'}]});
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-end"),state.offers.get("sender:offer-end").files[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0].status==='校验通过，点击保存');
+  let diag=t.receiver.run('diagnosticsSnapshot()');
+  assert.equal(diag.peers[0].transfer.endsReceived,1);
+  assert.equal(diag.peers[0].transfer.endsVerified,1);
+  assert.equal(diag.peers[0].transfer.endsIgnored,0);
+  assert.equal(diag.receive.recent[0].phase,'verified');
+  assert.equal(diag.receive.recent[0].receivedAllBytes,true);
+  assert.equal(diag.receive.recent[0].saveReady,true);
+  assert.equal(diag.receive.recent[0].failure,null);
+  assert.equal(JSON.stringify(diag.receive).includes('payload.bin'),false,
+    'ordinary diagnostics must not include file metadata');
+
+  // The message is still received in the current channel, but there is no
+  // longer an active job. Count the ignored end instead of silently dropping it.
+  await t.receiver.run("receiveChannel(state.peers.get('sender'),JSON.stringify({kind:'file-end',offerId:'offer-end',fileId:'file-end-test',sha256:'a'.repeat(64)}))");
+  diag=t.receiver.run('diagnosticsSnapshot()');
+  assert.equal(diag.peers[0].transfer.endsReceived,2);
+  assert.equal(diag.peers[0].transfer.endsIgnored,1);
+  assert.equal(diag.peers[0].transfer.endsVerified,1);
+
+  const lost=await linkedFilePeers();
+  const lostFile=new Blob(['data that should not be half delivered']);
+  lost.sender.state.outbound.set('offer-lost',new Map([['file-lost',lostFile]]));
+  lost.receiver.state.offers.set('sender:offer-lost',{peerId:'sender',offerId:'offer-lost',
+    files:[{id:'file-lost',name:'privacy-name.bin',size:lostFile.size,status:'pending'}]});
+  const send=lost.a.channel.send;
+  // Suppress only binary data while keeping file-start and file-end in order.
+  lost.a.channel.send=data=>{ if(typeof data==='string')send(data); };
+  lost.receiver.run('acceptFile(state.offers.get("sender:offer-lost"),state.offers.get("sender:offer-lost").files[0])');
+  await flushUntil(()=>lost.receiver.state.jobs[0].status==='失败：文件大小不匹配');
+  const incomplete=lost.receiver.run('diagnosticsSnapshot()');
+  assert.equal(incomplete.peers[0].transfer.endsSizeMismatch,1);
+  assert.equal(incomplete.peers[0].transfer.endsVerified,0);
+  assert.equal(incomplete.receive.recent[0].phase,'failed');
+  assert.equal(incomplete.receive.recent[0].failure,'size-mismatch');
+  assert.equal(incomplete.receive.recent[0].receivedAllBytes,false);
+  assert.equal(incomplete.receive.recent[0].saveReady,false);
+  assert.equal(JSON.stringify(incomplete.receive).includes('privacy-name.bin'),false);
+});
+
+test('ordinary receive diagnostics distinguish SHA-256 failure from a successful save and never copy sender error text', async () => {
+  const t=await linkedFilePeers({tamperBinary:data=>data instanceof ArrayBuffer});
+  const source=new Blob(['correct bytes']);
+  t.sender.state.outbound.set('offer-digest',new Map([['file-digest',source]]));
+  t.receiver.state.offers.set('sender:offer-digest',{peerId:'sender',offerId:'offer-digest',
+    files:[{id:'file-digest',name:'private-file.bin',size:source.size,status:'pending'}]});
+  t.receiver.run('acceptFile(state.offers.get("sender:offer-digest"),state.offers.get("sender:offer-digest").files[0])');
+  await flushUntil(()=>t.receiver.state.jobs[0].status.includes('SHA-256 校验失败'));
+  const diag=t.receiver.run('diagnosticsSnapshot()');
+  assert.equal(diag.peers[0].transfer.endsChecksumMismatch,1);
+  assert.equal(diag.peers[0].transfer.endsVerified,0);
+  assert.equal(diag.receive.recent[0].phase,'failed');
+  assert.equal(diag.receive.recent[0].failure,'checksum-mismatch');
+  assert.equal(diag.receive.recent[0].receivedAllBytes,true);
+  assert.equal(diag.receive.recent[0].saveReady,false);
+  assert.equal(JSON.stringify(diag.receive).includes('private-file.bin'),false);
+  t.receiver.run("state.jobs[0].status='失败：<private sender text 192.168.0.1>'; ");
+  const redacted=t.receiver.run('diagnosticsSnapshot().receive.recent[0]');
+  assert.equal(redacted.failure,'other-failure');
+  assert.ok(!JSON.stringify(redacted).includes('private sender text'));
+  assert.ok(!JSON.stringify(redacted).includes('192.168.'));
+});
