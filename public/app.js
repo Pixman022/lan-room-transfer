@@ -13,6 +13,8 @@ const PEER_PRIMARY_ATTEMPTS = 2;
 const PEER_MAX_ATTEMPTS = 4;
 const READY_REANNOUNCE_MAX = 2;
 const READY_REANNOUNCE_DELAY_MS = 5000;
+// Only receives resumed after a tab takeover get a bounded, P2P-only retry.
+const HANDOFF_RECEIVE_RETRY_DELAYS_MS = [2000, 5000];
 const RECONNECT_MAX_DELAY_MS = 15000;
 const SIGNAL_KEEPALIVE_MS = 20000;
 let reconnectTimer = null;
@@ -1685,6 +1687,8 @@ function restartHandoffReceives(offer) {
     job.chunks = [];
     job.cancelled = false;
     job.recovering = false;
+    job.fromHandoff = true;
+    job.handoffRetryCount = 0;
     job.status = '排队中';
     file.status = 'queued';
     state.queue.push(job);
@@ -1733,13 +1737,75 @@ function armJobTimer(job, delay, reason) {
     if (state.active === job) failActive(reason);
   }, delay);
 }
+// A just-promoted receiver may ask for a file while its old sender task is
+// still unwinding, or while a verified P2P path's stats are briefly settling.
+// Retry only known transient failures, and always re-request the exact same
+// announced file via the normal ready-gated P2P sender and SHA-256 checks.
+function transientHandoffFailure(status) {
+  return new Set([
+    '失败：上一笔传输尚未结束，请稍后重试',
+    '失败：等待发送端超时',
+    '失败：发送端已响应，但未开始发送',
+    '失败：传输停滞超时',
+    '失败：文件请求发送失败',
+    '失败：设备连接断开',
+    '失败：连接断开',
+    '失败：设备直连状态已改变，已停止发送',
+  ]).has(status) ||
+    /路径检查失败（(?:pair-unavailable|stats-unavailable|stats-error)）$/.test(status);
+}
+function scheduleHandoffRetry(job, status, file) {
+  const attempt = job.handoffRetryCount || 0;
+  const peer = state.peers.get(job.peerId);
+  if (!job.fromHandoff || job.cancelled || job.url || !transientHandoffFailure(status) ||
+      attempt >= HANDOFF_RECEIVE_RETRY_DELAYS_MS.length || !peer?.ready ||
+      peer.channel?.readyState !== 'open' || !file ||
+      file.name !== job.name || file.size !== job.size) return false;
+  const delay = HANDOFF_RECEIVE_RETRY_DELAYS_MS[attempt];
+  job.handoffRetryCount = attempt + 1;
+  job.recovering = true;
+  job.received = 0;
+  job.chunks = [];
+  job.status = `恢复传输受阻，${delay / 1000} 秒后自动重试（${attempt + 1}/${HANDOFF_RECEIVE_RETRY_DELAYS_MS.length}）`;
+  file.status = 'queued';
+  job.handoffRetryTimer = setTimeout(() => {
+    job.handoffRetryTimer = null;
+    if (state.leaving || !job.recovering || job.cancelled || job.url) return;
+    const currentPeer = state.peers.get(job.peerId);
+    const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
+    const currentFile = offer?.files.find(item => item.id === job.fileId &&
+      item.name === job.name && item.size === job.size);
+    if (!currentPeer?.ready || currentPeer.channel?.readyState !== 'open' ||
+        !currentFile) {
+      job.recovering = false;
+      job.status = '失败：连接或文件来源已变化，请手动重试';
+      if (currentFile) currentFile.status = 'failed';
+      renderRoomFiles();
+      return;
+    }
+    job.recovering = false;
+    job.status = '排队中';
+    currentFile.status = 'queued';
+    state.queue.push(job);
+    renderRoomFiles();
+    startNext();
+  }, delay);
+  return true;
+}
 function finishJob(status) {
   const job = state.active;
   if (!job) return;
   if (job.timer) clearTimeout(job.timer);
-  job.status = status;
+  job.timer = null;
   const offer = state.offers.get(`${job.peerId}:${job.offerId}`);
   const file = offer?.files.find(f => f.id === job.fileId);
+  if (scheduleHandoffRetry(job, status, file)) {
+    state.active = null;
+    renderRoomFiles();
+    queueMicrotask(startNext);
+    return;
+  }
+  job.status = status;
   if (file) file.status = status === '校验通过，点击保存' ? 'complete' : 'failed';
   job.chunks = [];
   state.active = null;
@@ -1753,7 +1819,10 @@ function cancelJob(job) {
     return;
   }
   if (job.recovering) {
+    if (job.handoffRetryTimer) clearTimeout(job.handoffRetryTimer);
+    job.handoffRetryTimer = null;
     job.recovering = false;
+    job.cancelled = true;
     job.status = '已取消';
     renderRoomFiles();
     return;
@@ -1794,6 +1863,7 @@ function retryJob(job) {
     return;
   }
   job.received = 0; job.chunks = []; job.cancelled = false; job.status = '排队中';
+  job.fromHandoff = false; // A manual retry is an independent user action.
   file.status = 'queued';
   state.queue.push(job); renderRoomFiles(); startNext();
 }
@@ -2006,6 +2076,9 @@ function withdrawPeerFile(peerId, offerId, fileId) {
   if (state.active?.peerId === peerId && state.active?.fileId === fileId) finishJob('已撤回');
   for (const job of state.jobs) {
     if (job.peerId === peerId && job.offerId === offerId && job.fileId === fileId && !job.url) {
+      if (job.handoffRetryTimer) clearTimeout(job.handoffRetryTimer);
+      job.handoffRetryTimer = null;
+      job.recovering = false;
       job.status = '已撤回';
     }
   }
