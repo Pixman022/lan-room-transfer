@@ -2076,6 +2076,44 @@ test('R05: redacted bounded signal history distinguishes consecutive joined and 
   assert.ok(!JSON.stringify(bounded).includes('SECRET'));
 });
 
+test('R06: repeated offline WebSocket closes retain earlier room transitions in redacted diagnostics', () => {
+  const t=harness();
+  t.run(`noteSignalTransition('entry','created');
+    for(let i=0;i<24;i++) noteSignalTransition('disconnect','socket-close');
+    noteSignalTransition('entry','resumed');
+    for(let i=0;i<16;i++) noteSignalTransition('disconnect','socket-close');
+    noteSignalTransition('entry','created');`);
+  assert.deepEqual(JSON.parse(JSON.stringify(t.run('diagnosticsSnapshot().signalHistory'))),[
+    {event:'entry',value:'created'},
+    {event:'disconnect',value:'socket-close',count:24},
+    {event:'entry',value:'resumed'},
+    {event:'disconnect',value:'socket-close',count:16},
+    {event:'entry',value:'created'},
+  ], 'offline retry bursts should not evict actual room creations or resumes');
+  // Merge only consecutive identical disconnect codes; different error codes
+  // and consecutive entries remain distinct evidence.
+  t.run(`noteSignalTransition('disconnect','keepalive-timeout');
+    noteSignalTransition('disconnect','raw private 192.168.3.42');
+    noteSignalTransition('disconnect','raw private 192.168.3.43');
+    noteSignalTransition('entry','resumed');
+    noteSignalTransition('entry','resumed');`);
+  const history=JSON.parse(JSON.stringify(t.run('diagnosticsSnapshot().signalHistory')));
+  assert.deepEqual(history.slice(-4),[
+    {event:'disconnect',value:'keepalive-timeout'},
+    {event:'disconnect',value:'other',count:2},
+    {event:'entry',value:'resumed'},
+    {event:'entry',value:'resumed'},
+  ]);
+  assert.equal(history.length,9);
+  assert.ok(!JSON.stringify(history).includes('192.168.'));
+  t.run(`for(let i=0;i<22;i++){
+    noteSignalTransition('entry','joined');
+    noteSignalTransition('disconnect','socket-close');
+  }`);
+  assert.equal(t.run('diagnosticsSnapshot().signalHistory.length'),12,
+    'retain a bounded ring of the most recent distinct transitions');
+});
+
 test('R06 active idle socket replies to keepalive and manual Leave stops watchdog', async () => {
   const t=harness();
   t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');

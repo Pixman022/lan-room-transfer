@@ -33,9 +33,17 @@ function noteSignalTransition(event, value) {
   const entering = event === 'entry';
   const allowed = entering ? ['created', 'resumed', 'joined']
     : ['socket-close', 'keepalive-timeout', 'keepalive-send-failed'];
+  const safeValue = allowed.includes(value) ? value : 'other';
+  const last = signalHistory[signalHistory.length - 1];
+  // While offline, repeated failed WebSockets can otherwise evict the
+  // useful created/resumed events from this short redacted history.
+  if (!entering && last?.event === 'disconnect' && last.value === safeValue) {
+    last.count = (last.count || 1) + 1;
+    return;
+  }
   signalHistory.push({
     event: entering ? 'entry' : 'disconnect',
-    value: allowed.includes(value) ? value : 'other',
+    value: safeValue,
   });
   if (signalHistory.length > 12) signalHistory.shift();
 }
