@@ -16,6 +16,18 @@
 
 **Important boundaries:** A `roomEntry` snapshot is not a full event timeline. A successful in-app SHA-256 or saved-file checker **does not establish which browser saved the file or which physical run produced it**. Real-source files are neither stored in nor uploaded to the public signalling service. Large/zero-byte compatibility and physical LAN-only guarantees are not solved by the multi-tab acceptance.
 
+## Next field evidence — minimal steps, no redundant reruns
+
+**HASH-01 provenance (no new transfer or hash computation required):** For the five already-matching 2026-11-24 PowerShell result slots `A-from-B`, `B-from-A`, `C-5MiB`, `C-64KiB`, `C-0B`, confirm from the operator's download/source history which are **actually browser-saved receipts** (not copies of originals or manually created empty files), and which belong to the **same synchronized three-device run**. An answer can explicitly mark uncertain/mixed-run slots. If provenance cannot be established, retain `PARTIAL` acceptance rather than requesting the hashes again or guessing. This test does not require uploading files or exposing local paths.
+
+**R06 sole-member real network-loss test:**
+1. On one real computer/browser, close old LAN Room tabs, open one fresh tab and enter a unique room code as the **only** online member. Select a harmless small `R06.txt` file, confirm that the file is staged and `peerCount:0`. Keep the page foreground/open throughout (do **not** press Leave or refresh).
+2. Copy an initial **ordinary redacted** diagnostic. Disable the real device network connection (Wi-Fi or Ethernet), rather than closing the tab or merely simulating a WebSocket close in developer tools. Leave it disconnected long enough that the server can **detect the now-empty room**; native WebSocket and OS timers may delay this, so there is no guaranteed wall-clock deadline.
+3. Restore connectivity, still without refreshing/Leave. Observe whether the page automatically returns to its room and the original file remains staged. Copy a second ordinary diagnostic with `signal`, `signalKeepalive`, `roomEntry`, `localSharedFiles` and `peerCount`.
+4. **PASS for the strict R06 empty-room recreation:** an actual disconnect/recovery occurs, the old room was closed, `roomEntry:created` on auto-return, and the original `R06.txt` is still present with `localSharedFiles:1`. If `roomEntry:resumed`, the old room survived the interruption: **not a failure of valid reconnect**, but **inconclusive for the empty-room teardown gate**. If no disconnect was recorded or the tab was background-throttled, record `INCONCLUSIVE`. If the file disappears or re-entry requires manual action, record `FAIL` and collect the two ordinary reports. Never share `?debug=1` output with private SDP/IP/session credentials.
+
+**R05 identity clarification only:** Existing six-step reconnect/save test is user-confirmed PASS. One checked field said `joined` and a subsequently pasted normal JSON said `resumed`; identify when each was copied or whether they came from separate reconnects. Do **not** rerun the successful transfer merely for this wording.
+
 ## Same-profile multi-tab acceptance update (2026-11-25)
 
 **Original T01–T05 physical matrix: 5/5 PASS** under the original `4fcb61a3` rules, documented in [Issue #55](https://github.com/Pixman022/lan-room-transfer/issues/55) (closed as historically complete). T04 user report: Chrome A/B/C listed as one device on Android D; closing C withdrew only C's shared file; A/B remained in the room and D received and saved B's shared file. T03 interrupted receive was also user-confirmed successfully saved on physical devices, but its externally independently computed SHA-256 was not supplied.
