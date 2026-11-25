@@ -90,6 +90,7 @@ window.__smokeDropTabLeftNotice = () => {
         route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
 
     one.route('**/static/app.js', inject_file_state)
+    two.route('**/static/app.js', inject_file_state)
     # Observe the real sockets so the smoke test can cause an unexpected
     # signalling-only close without mutating production application code.
     for context in (one, two):
@@ -286,6 +287,10 @@ window.__smokeDropTabLeftNotice = () => {
     # This same-machine test cannot assert B/C P2P path or file-byte recovery.
     b.locator('#toggle-diagnostics').click()
     assert b.evaluate('window.__smokeWebSockets.length') == 1
+    # A real Chromium WebSocket can close while this tab owns an unfinished
+    # receive. Preserve its intent instead of permanently failing it.
+    b.evaluate('window.__smokeStageInterruptedReceive()')
+    assert b.evaluate('window.__smokeReceiveJobs()[0].received') == 5
     b.evaluate('window.__smokeWebSockets[0].close(4000, "test interruption")')
     b.wait_for_function("""() =>
         window.__smokeWebSockets.length >= 2 &&
@@ -294,6 +299,13 @@ window.__smokeDropTabLeftNotice = () => {
     """, timeout=15000)
     b.locator('#peer-list').get_by_text('Updated Laptop').wait_for()
     assert b.locator('#room-name').inner_text() == 'HOME2026'
+    b.wait_for_function("""() => {
+      const job=window.__smokeReceiveJobs().find(item => item.name==='handoff-partial.bin');
+      return job && job.recovering && job.received === 0 &&
+        job.status === '等待连接恢复后重新接收';
+    }""", timeout=15000)
+    b.locator('#incoming-requests').get_by_text('handoff-partial.bin').wait_for()
+    assert b.locator('#incoming-requests').get_by_role('button', name='取消').count() == 1
     b.locator('#toggle-diagnostics').click()
 
     b.locator('#leave-room').click()
