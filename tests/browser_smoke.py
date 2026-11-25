@@ -427,18 +427,18 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
         document.getElementById('room-screen').hidden === false
     """, timeout=15000)
     assert survivor.locator('#room-name').inner_text() == 'ABRUPT26'
-    survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for(state='detached')
+    survivor.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
     survivor.locator('#sent-files').get_by_text('survivor-owned.bin').wait_for()
     survivor.locator('#sent-files').get_by_text('third-owned.bin').wait_for()
     assert [row['bytes'] for row in survivor.evaluate('window.__smokeOwnFileData()')] == [
-        list(b'from-second-tab'), list(b'from-third-tab')
-    ], 'file selected by a surviving tab was lost'
+        list(b'test-handoff-bytes'), list(b'from-second-tab'), list(b'from-third-tab'),
+    ], 'transport takeover must preserve all three tabs original File handles'
     assert '房间同步中断' not in survivor.locator('#feedback').inner_text()
     assert third.evaluate('window.__smokeWebSockets.length') == 0
-    third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for(state='detached')
+    third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
 
-    # When the second tab closes, its own file disappears but the third
-    # tab's independently selected file remains available.
+    # When the second tab closes, its shared files remain with the original
+    # logical device; the third tab can assume all three file sources.
     survivor.close()
     third.wait_for_function("""() =>
         window.__smokeWebSockets.length === 1 &&
@@ -446,14 +446,17 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
         document.getElementById('room-screen').hidden === false
     """, timeout=15000)
     assert third.locator('#room-name').inner_text() == 'ABRUPT26'
-    third.locator('#sent-files').get_by_text('survivor-owned.bin').wait_for(state='detached')
+    third.locator('#sent-files').get_by_text('survive-owner-close.bin').wait_for()
+    third.locator('#sent-files').get_by_text('survivor-owned.bin').wait_for()
     third.locator('#sent-files').get_by_text('third-owned.bin').wait_for()
-    assert [row['bytes'] for row in third.evaluate('window.__smokeOwnFileData()')] == [list(b'from-third-tab')], 'third tab lost its own file'
+    assert [row['bytes'] for row in third.evaluate('window.__smokeOwnFileData()')] == [
+        list(b'test-handoff-bytes'), list(b'from-second-tab'), list(b'from-third-tab'),
+    ], 'last surviving tab must still have all three source files'
     third.locator('#leave-room').click()
     third.locator('#home-screen').wait_for(state='visible')
 
-    # A newly shared file disappears when its selecting tab closes,
-    # even before the next coalesced UI snapshot is emitted.
+    # Even when the file shelf snapshot has not yet updated, the actual
+    # File handles are posted with handoff before a selecting owner tab closes.
     quick = one.new_page()
     quick.goto(ROOT)
     quick.locator('#room-code-input').fill('FASTEXIT')
@@ -482,9 +485,11 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
         window.__smokeWebSockets.length === 1 &&
         window.__smokeWebSockets[0].readyState === WebSocket.OPEN
     """, timeout=15000)
-    quick_follower.locator('#sent-files').get_by_text('fast-exit.txt').wait_for(state='detached')
+    quick_follower.locator('#sent-files').get_by_text('fast-exit.txt').wait_for()
     quick_follower.locator('#sent-files').get_by_text('still-open.txt').wait_for()
-    assert [row['bytes'] for row in quick_follower.evaluate('window.__smokeOwnFileData()')] == [list(b'still-open')], 'surviving tab lost its independently selected file'
+    assert [row['bytes'] for row in quick_follower.evaluate('window.__smokeOwnFileData()')] == [
+        list(b'still-open'), list(b'content-survives'),
+    ], 'fast-close owner must hand off the newly shared File before exit'
     quick_follower.locator('#leave-room').click()
 
     # Deliberate "退出房间" is different from closing a tab: clicking it in
