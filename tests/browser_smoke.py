@@ -332,6 +332,14 @@ window.__smokeDropTabLeftNotice = () => {
     a.locator('#toggle-diagnostics').click()
     assert not errors, errors
 
+    # The remote sending device must remain in the room during takeover;
+    # otherwise the original room would be empty/closed and a fresh room
+    # correctly cannot resume an absent source (covered by Node regression).
+    b.locator('#room-code-input').fill('HOME2026')
+    b.locator('#enter-room').click()
+    b.locator('#room-screen').wait_for(state='visible')
+    a.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
+
     # The outgoing transport tab may close while bytes are still buffered.
     # Do not wait for the coalesced 120 ms room snapshot: pagehide must hand
     # off the latest receive intent so the survivor can restart from zero.
