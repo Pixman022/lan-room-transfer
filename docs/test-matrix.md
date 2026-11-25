@@ -1,5 +1,21 @@
 # POC field test matrix
 
+## Same-profile multi-tab acceptance update (2026-11-25)
+
+**Original T01–T05 physical matrix: 5/5 PASS** under the original `4fcb61a3` rules, documented in [Issue #55](https://github.com/Pixman022/lan-room-transfer/issues/55) (closed as historically complete). T04 user report: Chrome A/B/C listed as one device on Android D; closing C withdrew only C's shared file; A/B remained in the room and D received and saved B's shared file. T03 interrupted receive was also user-confirmed successfully saved on physical devices, but its externally independently computed SHA-256 was not supplied.
+
+**Revised requirement (new independent acceptance):** The user wants all same-profile room tabs treated as **one device's shared file shelf**, so closing a single tab must **not** withdraw its files. Track [Issue #69](https://github.com/Pixman022/lan-room-transfer/issues/69). This is an intentional change from old T04 and is **not a failed original T04**.
+
+| Case | New expected outcome | Status |
+| --- | --- | --- |
+| T04-new-C | A/B/C each share uniquely named files; Android D sees one logical desktop device. Close C without Leave; C's file **remains** alongside A/B. D must receive and save **C's original file** without reselecting it | Code + simulated controller/browser checks in progress; **physical retest pending** |
+| T04-new-A | With a surviving same-profile tab open, close transport holder A; survivor takes over and D can still receive and save an original A-selected file | Code + simulated controller/browser checks in progress; **physical retest pending** |
+| T05 invariant | Explicit Leave on any of A/B/C exits the whole same-profile logical device and withdraws its files; D stays in the room | Previously user-confirmed PASS; regression required |
+| Remove invariant | Explicit Remove still withdraws only the chosen shared file from the device-wide shelf | Previously implemented; regression required |
+| Last tab | Closing last browser tab ends that local participant; no durable file/room persistence guarantee | Intended scope, not persistent storage |
+
+No file content is uploaded to the public signalling server. The device's File/Blob references are shared only between surviving same-origin room tabs. Source handles unavailable to every surviving tab cannot be guaranteed after the original tab exits. Large files remain subject to browser/available-memory limits. ICE reliability [Issue #6](https://github.com/Pixman022/lan-room-transfer/issues/6) remains **deferred**, and no ICE policy changes belong to this work.
+
 ## Current acceptance gate (2026-11-23)
 
 **2026-11-24 zero-byte save observation:** The user reports that some

@@ -90,30 +90,6 @@ const localRoomTabId = crypto.randomUUID();
 // A room belongs to one active tab per browser profile/origin. Hold the lock
 // across WebSocket reconnects; never use a display name or IP as identity.
 let roomTabLease = null;
-// A separate tab-scoped Web Lock stays held while a follower exists.
-// Unlike pagehide messages, browsers release it even on abrupt tab teardown.
-let sourceTabLease = null;
-function sourceTabLockName(code, tabId) {
-  return `lan-room-source-tab:${code}:${tabId}`;
-}
-async function holdSourceTabLease(code) {
-  if (!navigator.locks?.request || sourceTabLease?.code === code) return;
-  await new Promise(resolve => {
-    navigator.locks.request(sourceTabLockName(code, localRoomTabId), () =>
-      new Promise(release => {
-        sourceTabLease = { code, release };
-        resolve();
-      })).catch(error => {
-      trace('room.tab.presence-lock.failed', { error: String(error) });
-      resolve();
-    });
-  });
-}
-function releaseSourceTabLease() {
-  const lease = sourceTabLease;
-  sourceTabLease = null;
-  lease?.release();
-}
 let currentRoomExitRevision = null;
 // A deliberate Leave ends every tab of this room in the current browser
 // profile; closing a tab never changes this revision.
@@ -142,7 +118,6 @@ function releaseRoomTab(notifyChanging = true) {
   const lease = roomTabLease;
   roomTabLease = null;
   lease?.release();
-  releaseSourceTabLease();
 }
 
 // Browser-profile tabs share ONE WebSocket/P2P controller for each room.
@@ -311,18 +286,14 @@ function applyMirroredView(view) {
   $('qa-enable').hidden = true;
   feedback(view.feedback || '房间信息已同步', view.feedbackError);
 }
-function closeMirroredRoom(notifyTabLeft = true) {
+function closeMirroredRoom() {
   if (!mirroredRoom) return;
   const mirror = mirroredRoom;
-  if (notifyTabLeft) {
-    mirror.channel.postMessage({ type: 'tab-left', code: mirror.code, tabId: localRoomTabId });
-  }
   mirror.takeoverAbort?.abort();
   if (mirror.entryTimeout) clearTimeout(mirror.entryTimeout);
   mirror.entryResolve?.();
   clearInterval(mirror.watchdog);
   mirror.channel.close();
-  releaseSourceTabLease();
   for (const url of mirror.savedUrls?.values() || []) URL.revokeObjectURL(url);
   try { sessionStorage.removeItem('lan-room-mirror-code'); }
   catch { /* Storage may be blocked. */ }
@@ -348,7 +319,7 @@ function awaitRoomTakeover(mirror) {
     // An explicit group exit may have happened before this lock callback.
     // Prevent the waiting tab from resurrecting that exited room.
     if (readRoomExitRevision(mirror.code) !== mirror.exitRevision) {
-      closeMirroredRoom(false);
+      closeMirroredRoom();
       currentRoomExitRevision = null;
       feedback('已退出房间');
       return;
@@ -384,10 +355,10 @@ function promoteMirroredRoom(mirror) {
   state.lastRoomEntry = view.roomEntry;
   state.peers = new Map();
   state.offers = new Map();
-  // Take over the room, not the source files of the tab that closed.
-  // File offers selected in surviving tabs remain available.
+  // All tabs represent one logical device. File/Blob handles already cloned
+  // to this surviving tab remain device-owned regardless of which tab picked
+  // the file, even when that original selecting tab closed.
   state.ownOffers = (mirror.sharedOffers || view.ownOffers).filter(offer => {
-    if (mirror.transportTabId && offer.ownerTabId === mirror.transportTabId) return false;
     const files = mirror.sources.get(offer.offerId);
     offer.files = offer.files.filter(file => files?.has(file.id));
     return offer.files.length;
@@ -429,8 +400,6 @@ async function openMirroredRoom(code) {
     feedback('当前浏览器不支持房间页面同步，请使用另一标签页', true);
     return;
   }
-  // Must be held before this tab can share any File handles with its owner.
-  await holdSourceTabLease(code);
   const channel = new BroadcastChannel(roomChannelName(code));
   try { sessionStorage.setItem('lan-room-mirror-code', code); }
   catch { /* This tab can still mirror without stored room-code prefill. */ }
@@ -500,33 +469,13 @@ function handleMirroredAction(action, tabId) {
     case 'retry': if (job) retryJob(job); break;
   }
 }
-async function reapClosedSourceTabs(owner) {
-  if (!navigator.locks?.query || ownerRoomChannel !== owner ||
-      state.code !== owner.code) return;
-  const tabIds = new Set(state.ownOffers.map(offer => offer.ownerTabId)
-    .filter(tabId => tabId && tabId !== localRoomTabId));
-  if (!tabIds.size) return;
-  try {
-    const { held } = await navigator.locks.query();
-    if (ownerRoomChannel !== owner || state.code !== owner.code) return;
-    const live = new Set(held.map(lock => lock.name));
-    for (const tabId of tabIds) {
-      if (!live.has(sourceTabLockName(owner.code, tabId))) withdrawTabShares(tabId);
-    }
-  } catch (error) {
-    trace('room.tab.presence-check.failed', { error: String(error) });
-  }
-}
-function startOwnerRoomChannel(code) {
+async function startOwnerRoomChannel(code) {
   if (!window.BroadcastChannel) return;
   closeOwnerRoomChannel();
   const channel = new BroadcastChannel(roomChannelName(code));
   const owner = { code, channel, heartbeat: null };
   ownerRoomChannel = owner;
-  owner.heartbeat = setInterval(() => {
-    broadcastRoomView();
-    reapClosedSourceTabs(owner);
-  }, 4000);
+  owner.heartbeat = setInterval(broadcastRoomView, 4000);
   channel.onmessage = ({ data }) => {
     if (data?.type === 'hello') {
       if (state.code === code) {
@@ -539,9 +488,6 @@ function startOwnerRoomChannel(code) {
       }
     } else if (data?.type === 'action') {
       handleMirroredAction(data.action, data.tabId);
-    } else if (data?.type === 'tab-left' && data.code === code &&
-               typeof data.tabId === 'string') {
-      withdrawTabShares(data.tabId);
     } else if (data?.type === 'leave-all' && data.code === code) {
       leaveRoomLocally();
     }
@@ -2089,6 +2035,7 @@ function shareFiles(files, ownerTabId = localRoomTabId) {
     return { id, name: file.name, size: file.size };
   });
   state.outbound.set(offerId, fileMap);
+  // Remember the selecting tab for diagnostics, not as file lifetime ownership.
   state.ownOffers.push({ offerId, ownerTabId, files: metadata });
   broadcastRoomHandoff();
   for (const peer of state.peers.values()) syncSharedOffers(peer);
@@ -2097,12 +2044,6 @@ function shareFiles(files, ownerTabId = localRoomTabId) {
   feedback(files.some(file => file.size > LARGE_FILE_WARNING_BYTES)
     ? '大文件已加入共享列表；实验性传输可能因浏览器内存不足而失败'
     : ready ? '文件已加入房间共享列表' : '文件已添加，等待设备直连');
-}
-function withdrawTabShares(tabId) {
-  for (const offer of [...state.ownOffers]) {
-    if (offer.ownerTabId !== tabId) continue;
-    for (const file of [...offer.files]) withdrawSharedFile(offer.offerId, file.id);
-  }
 }
 function withdrawSharedFile(offerId, fileId) {
   if (mirroredRoom) {
@@ -2740,7 +2681,7 @@ $('enter-room').onclick = async () => {
 };
 function leaveRoomLocally() {
   if (mirroredRoom) {
-    closeMirroredRoom(false);
+    closeMirroredRoom();
     currentRoomExitRevision = null;
     feedback('已退出房间');
     return;
@@ -2819,14 +2760,11 @@ window.addEventListener('beforeunload', event => {
   if (state.active) { event.preventDefault(); event.returnValue = ''; }
 });
 window.addEventListener('pagehide', () => {
-  if (mirroredRoom) {
-    mirroredRoom.channel.postMessage({
-      type: 'tab-left', code: mirroredRoom.code, tabId: localRoomTabId,
-    });
-  } else if (ownerRoomChannel) {
-    withdrawTabShares(localRoomTabId);
+  // A tab/window close does not remove the logical device's shared files.
+  // The controller republishes its existing File handles to surviving tabs
+  // before its Web Lock is released; a mirror simply closes.
+  if (!mirroredRoom && ownerRoomChannel) {
     broadcastRoomHandoff();
     broadcastRoomView();
   }
-  releaseSourceTabLease();
 });
