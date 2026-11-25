@@ -2026,10 +2026,54 @@ test('R06 idle solo room: silent WebSocket is detected and recreated without los
   assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'created');
   assert.equal(t.run('diagnosticsSnapshot().localSharedFiles'),1);
   assert.equal(t.run('diagnosticsSnapshot().signalKeepalive.timeouts'),1);
+  assert.deepEqual(JSON.parse(JSON.stringify(t.run('diagnosticsSnapshot().signalHistory'))), [
+    {event:'entry',value:'joined'},
+    {event:'disconnect',value:'keepalive-timeout'},
+    {event:'entry',value:'created'},
+  ], 'one ordinary diagnostic must show idle solo room recreation after timeout');
   assert.equal(t.intervals.size,1);
   first.emit('message',{data:JSON.stringify({type:'keepalive-ack',seq:sent.seq})});
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(t.run('diagnosticsSnapshot().signalKeepalive.acksReceived'),0,'stale ack ignored');
+});
+
+test('R05: redacted bounded signal history distinguishes consecutive joined and resumed entries', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  const first=t.FakeWebSocket.sockets[0];
+  first.close();
+  fireNextTimer(t);
+  const second=t.FakeWebSocket.sockets.at(-1);
+  second.open();
+  await t.run('handleServer({type:"welcome",code:"5832",id:"local-id",token:"local-token",generation:"gen-2",name:"Amber Fox",peers:[],created:false})');
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'resumed');
+  second.close();
+  fireNextTimer(t);
+  const third=t.FakeWebSocket.sockets.at(-1);
+  third.open();
+  await t.run('handleServer({type:"welcome",code:"5832",id:"new-id",token:"SECRET-SESSION-TOKEN",generation:"gen-3",name:"Private Display Name",peers:[],created:false})');
+  const snapshot=t.run('diagnosticsSnapshot()');
+  assert.equal(snapshot.roomEntry,'joined');
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.signalHistory)), [
+    {event:'entry',value:'joined'},
+    {event:'disconnect',value:'socket-close'},
+    {event:'entry',value:'resumed'},
+    {event:'disconnect',value:'socket-close'},
+    {event:'entry',value:'joined'},
+  ]);
+  const text=JSON.stringify(snapshot.signalHistory);
+  for (const secret of ['5832','local-id','new-id','local-token','SECRET-SESSION-TOKEN',
+    'Private Display Name','192.168.1.4']) {
+    assert.equal(text.includes(secret),false,'ordinary timeline must never expose room or identity details');
+  }
+  t.run(`for(let i=0;i<25;i++) noteSignalTransition('disconnect',
+    i%2===0 ? 'keepalive-timeout' : 'sensitive 192.168.1.4 SECRET-SESSION-TOKEN')`);
+  const bounded=t.run('diagnosticsSnapshot().signalHistory');
+  assert.equal(bounded.length,12,'diagnostic events must remain strictly bounded');
+  assert.equal(bounded.at(-1).value,'other','unrecognized reasons must be converted to fixed enum');
+  assert.ok(!JSON.stringify(bounded).includes('192.168.'));
+  assert.ok(!JSON.stringify(bounded).includes('SECRET'));
 });
 
 test('R06 active idle socket replies to keepalive and manual Leave stops watchdog', async () => {
