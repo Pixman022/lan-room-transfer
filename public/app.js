@@ -825,11 +825,11 @@ function connect(action) {
       clearTimeout(peer.connectTimer);
       peer.pc.close();
     }
-    failActive('信令连接断开');
-    for (const job of state.queue.splice(0)) {
-      job.status = '失败：连接已中断';
-      job.chunks = [];
-    }
+    // WebSocket recovery rebuilds every WebRTC peer. Preserve unfinished
+    // receive *intent*, not old partial bytes or obsolete send permissions.
+    // The receiver may request the same file only after a fresh verified P2P
+    // channel reannounces its original offer and matching file metadata.
+    suspendReceivesForSignalRecovery();
     state.offers.clear();
     if (!state.leaving && (wasJoined || action.code)) {
       // Keep locally staged File objects; renewed peers receive their catalog.
@@ -898,6 +898,15 @@ async function handleServer(msg) {
         : rememberedSession?.code === msg.code ? rememberedSession.id : null;
       state.lastRoomEntry = msg.created === true ? 'created'
         : previousId && previousId === msg.id ? 'resumed' : 'joined';
+      // A freshly created room has no previous sending member or catalog.
+      // Do not make an old remote receive appear indefinitely recoverable.
+      if (restored && msg.created === true) {
+        for (const job of state.jobs) {
+          if (!job.recovering) continue;
+          job.recovering = false;
+          job.status = '失败：原房间已关闭，请重新选择接收';
+        }
+      }
       stopReconnect();
       reconnectAttempts = 0;
       state.code = msg.code; state.id = msg.id; state.token = msg.token; state.generation = msg.generation;
@@ -1670,6 +1679,33 @@ async function startSendingFile(peer, request) {
   }
 }
 
+function suspendReceivesForSignalRecovery() {
+  const queued = new Set(state.queue);
+  for (const job of state.jobs) {
+    if (state.active !== job && !queued.has(job) && !job.recovering) continue;
+    if (job.timer) clearTimeout(job.timer);
+    job.timer = null;
+    if (job.handoffRetryTimer) clearTimeout(job.handoffRetryTimer);
+    job.handoffRetryTimer = null;
+    job.chunks = [];
+    if (job.cancelled) {
+      job.recovering = false;
+      job.status = '已取消';
+      continue;
+    }
+    if (job.url) continue; // Never invalidate a verified saved download.
+    // An incomplete legacy/malformed queued task has no safe source to
+    // match after reconnect; unlike valid tasks it remains a failure.
+    const matchable = typeof job.offerId === 'string' &&
+      typeof job.fileId === 'string' && typeof job.name === 'string' &&
+      Number.isSafeInteger(job.size) && job.size >= 0;
+    job.recovering = matchable;
+    job.received = 0;
+    job.status = matchable ? '等待连接恢复后重新接收' : '失败：连接已中断';
+  }
+  state.active = null;
+  state.queue = [];
+}
 function restartHandoffReceives(offer) {
   const peer = state.peers.get(offer.peerId);
   if (!peer?.ready) return;
