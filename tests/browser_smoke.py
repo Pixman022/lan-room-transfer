@@ -77,6 +77,7 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
   name: job.name, received: job.received, status: job.status,
   recovering: job.recovering === true, cancelled: job.cancelled === true,
 }));
+window.__smokeSignalHistory = () => diagnosticsSnapshot().signalHistory;
 """
         route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
 
@@ -265,8 +266,8 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
     duplicate.locator('#room-screen').wait_for(state='visible')
     duplicate.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
     assert duplicate.evaluate('window.__smokeWebSockets.length') == 0
-    # File picked in the surviving tab belongs to that tab, even while the
-    # original transport tab owns the one P2P connection.
+    # A File selected in any tab is replicated into the logical device shelf
+    # while the transport owner maintains the one P2P connection.
     with duplicate.expect_file_chooser() as keep_chooser:
         duplicate.locator('#drop-zone').click()
     keep_chooser.value.set_files({
@@ -296,6 +297,10 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
     """, timeout=15000)
     b.locator('#peer-list').get_by_text('Updated Laptop').wait_for()
     assert b.locator('#room-name').inner_text() == 'HOME2026'
+    assert b.evaluate('window.__smokeSignalHistory().slice(-2)') == [
+        {'event':'disconnect','value':'socket-close'},
+        {'event':'entry','value':'resumed'},
+    ], 'R05 ordinary diagnostics must expose last disconnect -> resumed sequence'
     b.wait_for_function("""() => {
       const job=window.__smokeReceiveJobs().find(item => item.name==='handoff-partial.bin');
       return job && job.recovering && job.received === 0 &&
@@ -323,6 +328,10 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
     """, timeout=15000)
     assert '房间进入：created' in a.locator('#diagnostics-content').inner_text()
     assert a.locator('#room-name').inner_text() == 'HOME2026'
+    assert a.evaluate('window.__smokeSignalHistory().slice(-2)') == [
+        {'event':'disconnect','value':'socket-close'},
+        {'event':'entry','value':'created'},
+    ], 'R06 solo member must show disconnect -> fresh room in redacted diagnostics'
     assert a.locator('#sent-files .file-row').count() == 4
     assert 'smoke.txt' in a.locator('#sent-files').inner_text()
     assert 'mirror-exit.txt' in a.locator('#sent-files').inner_text()
@@ -345,8 +354,8 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
     a.evaluate('window.__smokeStageInterruptedReceive()')
     assert a.evaluate('window.__smokeReceiveJobs()[0].received') == 5
     a.close()
-    # Closing (not explicitly leaving) the owner tab causes takeover. Only
-    # files selected by that closed tab are withdrawn.
+    # Closing (not explicitly leaving) the transport tab causes takeover;
+    # the same logical device retains all replicated file offers.
     duplicate.wait_for_function("""() =>
         window.__smokeWebSockets.length === 1 &&
         window.__smokeWebSockets[0].readyState === WebSocket.OPEN &&
