@@ -5,6 +5,7 @@ it validates room membership and user interaction, NOT actual LAN paths or
 cross-device file delivery.
 """
 import os
+import hashlib
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -78,6 +79,20 @@ window.__smokeReceiveJobs = () => state.jobs.map(job => ({
   recovering: job.recovering === true, cancelled: job.cancelled === true,
 }));
 window.__smokeSignalHistory = () => diagnosticsSnapshot().signalHistory;
+// Save-only test using the app's actual verified-Blob link. No LAN bytes.
+window.__smokeStageVerifiedDownload = async (name, bytes) => {
+  const blob = new Blob([Uint8Array.from(bytes)], {type:'application/octet-stream'});
+  const sha256 = await sha256Hex(blob);
+  if (!await verifySha256(blob, sha256)) throw new Error('fixture verification failed');
+  state.jobs.push({
+    peerId:'save-test-peer', offerId:'save-test-offer',
+    fileId:crypto.randomUUID(), name, size:blob.size, received:blob.size,
+    chunks:[], blob, url:URL.createObjectURL(blob),
+    status:'校验通过，点击保存', cancelled:false,
+  });
+  renderRoomFiles();
+  return {size:blob.size, sha256};
+};
 """
         route.fulfill(response=response, body=response.body().decode('utf-8') + instrument)
 
@@ -546,7 +561,43 @@ window.__smokeSignalHistory = () => diagnosticsSnapshot().signalHistory;
     outside.locator('#leave-room').click()
     for page in (group_a, group_b, group_c, outside):
         page.close()
+
+    # Exercise the actual Chromium download action for verified local Blobs.
+    # This does not simulate WebRTC or establish Android/iOS Save support.
+    save_page = one.new_page()
+    save_page.on('pageerror', lambda err: errors.append(str(err)))
+    save_page.goto(ROOT)
+    save_page.locator('#room-code-input').fill('SAVETEST')
+    save_page.locator('#enter-room').click()
+    save_page.locator('#room-screen').wait_for(state='visible')
+    for name, data in [('save-normal-5B.bin', b'hello'), ('save-empty-0B.bin', b'')]:
+        staged = save_page.evaluate(
+            '([name, bytes]) => window.__smokeStageVerifiedDownload(name, bytes)',
+            [name, list(data)],
+        )
+        assert staged['size'] == len(data)
+        assert staged['sha256'] == hashlib.sha256(data).hexdigest(), (
+            'browser fixture SHA must match independently calculated SHA-256'
+        )
+        link = save_page.locator(
+            f'#incoming-requests a.download-link[download="{name}"]'
+        )
+        assert link.count() == 1, 'one Save link per verified Blob'
+        if not data:
+            assert '空文件（0 B）可能无法在部分设备保存' in (
+                save_page.locator('#incoming-requests').inner_text()
+            )
+        with save_page.expect_download() as download_info:
+            link.click()
+        download = download_info.value
+        assert download.suggested_filename == name
+        saved_bytes = Path(download.path()).read_bytes()
+        assert saved_bytes == data, f'Chromium Save produced incorrect bytes: {name}'
+        assert hashlib.sha256(saved_bytes).hexdigest() == staged['sha256']
+    save_page.locator('#leave-room').click()
+    save_page.close()
     assert not errors, errors
     browser.close()
+    print('PASS: Chromium Save produces verified nonempty and 0-byte downloads with independent file hashes')
     print('PASS: explicit Leave exits all same-profile room tabs; closing a tab preserves survivors, R05/R06')
-    print('LIMIT: same-host browsers and induced WebSocket close; no physical network outage, routed P2P or file-byte proof')
+    print('LIMIT: same-host browsers and staged local Blobs; no physical network, P2P bytes or cross-platform Save proof')
