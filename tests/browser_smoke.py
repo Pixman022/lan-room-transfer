@@ -364,7 +364,10 @@ window.__smokeDropTabLeftNotice = () => {
     duplicate.locator('#sent-files').get_by_text('smoke.txt').wait_for(state='detached')
     duplicate.locator('#sent-files').get_by_text('mirror-stay.txt').wait_for()
     assert [row['bytes'] for row in duplicate.evaluate('window.__smokeOwnFileData()')] == [list(b'keep-mirror')], 'surviving tab lost its own shared file'
-    assert duplicate.locator('#connection-status').inner_text() == '房间已连接'
+    duplicate.locator('#peer-list').get_by_text('Mobile Phone').wait_for()
+    assert duplicate.locator('#connection-status').inner_text() in (
+        '直连未就绪', '文件直连就绪',
+    ), 'real remote member stays in the room after owner-tab closure'
     duplicate.locator('#leave-room').click()
     duplicate.locator('#home-screen').wait_for(state='visible')
 
