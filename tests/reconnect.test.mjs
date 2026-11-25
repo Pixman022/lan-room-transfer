@@ -2767,3 +2767,117 @@ test('T03: normal downloads and unsafe-route errors never auto-retry', async () 
   assert.match(t.receiver.state.jobs[0].status,/unsafe-route/);
   assert.equal([...t.receiver.timers.values()].some(x=>x.ms===2000||x.ms===5000),false);
 });
+
+
+test('T03: keepalive timeout preserves active and queued receive intents for verified catalog replay', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  const active={peerId:'sender-old',offerId:'offer-a',fileId:'file-a',name:'first.bin',
+    size:8,received:3,chunks:[new Uint8Array([1,2,3])],status:'传输中',
+    cancelled:false,url:null};
+  const queued={peerId:'sender-old',offerId:'offer-b',fileId:'file-b',name:'second.bin',
+    size:4,received:0,chunks:[],status:'排队中',cancelled:false,url:null};
+  const done={peerId:'sender-old',offerId:'offer-c',fileId:'file-c',name:'done.bin',
+    size:5,received:5,status:'校验通过，点击保存',url:'blob:already-verified',cancelled:false};
+  const canceled={peerId:'sender-old',offerId:'offer-d',fileId:'file-d',name:'no.bin',
+    size:5,received:0,status:'已取消',url:null,cancelled:true};
+  const priorFailure={peerId:'sender-old',offerId:'offer-e',fileId:'file-e',name:'bad.bin',
+    size:5,received:0,status:'失败：文件 SHA-256 校验失败，已丢弃数据',url:null,cancelled:false};
+  t.state.jobs.push(active,queued,done,canceled,priorFailure);
+  t.state.active=active;
+  t.state.queue.push(queued);
+  t.run("armJobTimer(state.active,20000,'传输停滞超时')");
+  t.run("signalRecover('keepalive-timeout')");
+  assert.equal(t.state.ws,null);
+  assert.equal(t.state.active,null);
+  assert.equal(t.state.queue.length,0);
+  assert.equal(active.recovering,true);
+  assert.equal(active.received,0,'partial bytes must be discarded after socket loss');
+  assert.equal(active.chunks.length,0);
+  assert.equal(queued.recovering,true,'queued receives must retain user intent');
+  assert.equal(queued.status,'等待连接恢复后重新接收');
+  assert.equal(done.url,'blob:already-verified','verified Save blob remains untouched');
+  assert.equal(canceled.status,'已取消');
+  assert.equal(priorFailure.status,'失败：文件 SHA-256 校验失败，已丢弃数据',
+    'pre-existing terminal failure must never revive');
+  assert.equal(t.timers.size,1,'old file watchdog is cleared; only reconnect timer remains');
+
+  fireNextTimer(t);
+  const ws2=t.FakeWebSocket.sockets.at(-1);
+  ws2.open();
+  await t.run('handleServer({type:"welcome",code:"5832",id:"local-id",token:"local-token",generation:"new-gen",name:"Amber Fox",peers:[],created:false})');
+  assert.equal(t.run('diagnosticsSnapshot().roomEntry'),'resumed');
+  t.run(`window.sentOnRecoveredChannel=[];state.peers.set('sender-new',{
+    id:'sender-new',name:'Phone',ready:true,channel:{readyState:'open',
+    send(message){window.sentOnRecoveredChannel.push(JSON.parse(message))}},
+    pc:{connectionState:'connected',iceConnectionState:'connected',close(){}}})`);
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-a',files:[{id:'file-a',name:'first.bin',size:8}]}))");
+  assert.equal(active.recovering,false);
+  assert.equal(active.peerId,'sender-new');
+  assert.equal(active.status,'等待发送端');
+  assert.equal(t.run("window.sentOnRecoveredChannel.filter(m=>m.kind==='request-file').length"),1);
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-b',files:[{id:'file-b',name:'second.bin',size:4}]}))");
+  assert.equal(queued.recovering,false);
+  assert.equal(queued.status,'排队中');
+  assert.equal(t.state.queue.length,1);
+  assert.equal(t.run("window.sentOnRecoveredChannel.filter(m=>m.kind==='request-file').length"),1,
+    'queued request must not start until active transfer finishes');
+  await t.run("receiveChannel(state.peers.get('sender-new'),JSON.stringify({kind:'file-list',offerId:'offer-e',files:[{id:'file-e',name:'bad.bin',size:5}]}))");
+  assert.equal(priorFailure.status,'失败：文件 SHA-256 校验失败，已丢弃数据');
+});
+
+test('T03: unexpected WebSocket close re-requests and verifies the whole file after P2P rebuild', async () => {
+  const t=await linkedFilePeers({realChecksum:true});
+  const bytes=new Blob(['complete contents must be retransmitted from byte zero']);
+  t.sender.state.outbound.set('offer-a',new Map([['file-a',bytes]]));
+  t.sender.state.ownOffers.push({offerId:'offer-a',
+    files:[{id:'file-a',name:'full.bin',size:bytes.size}]});
+  const job={peerId:'sender',offerId:'offer-a',fileId:'file-a',name:'full.bin',
+    size:bytes.size,received:7,chunks:[new Uint8Array([1,2,3,4,5,6,7])],
+    status:'传输中',cancelled:false,url:null};
+  t.receiver.state.jobs.push(job);
+  t.receiver.state.active=job;
+  t.receiver.FakeWebSocket.sockets[0].close();
+  assert.equal(job.recovering,true);
+  assert.equal(job.received,0);
+  fireNextTimer(t.receiver);
+  const ws2=t.receiver.FakeWebSocket.sockets.at(-1);
+  ws2.open();
+  await t.receiver.run('handleServer({type:"welcome",code:"5832",id:"local-id",token:"local-token",generation:"new-gen",name:"Amber Fox",peers:[],created:false})');
+  await t.receiver.run('createPeer("sender","Desktop",false,"new-sender-gen",3)');
+  const peer=t.receiver.state.peers.get('sender');
+  const channel={label:'room-files',ordered:true,readyState:'open',bufferedAmount:0,send(){}};
+  peer.pc.ondatachannel({channel});
+  peer.pc.connectionState='connected';
+  peer.pc.iceConnectionState='connected';
+  peer.ready=true;peer.verified=true;
+  channel.send=data=>setImmediate(()=>t.a.channel.onmessage({data}));
+  t.a.channel.send=data=>setImmediate(()=>channel.onmessage({data}));
+  t.a.syncedOffers.clear();
+  t.sender.run('syncSharedOffers(state.peers.get("receiver"))');
+  await flushUntil(()=>job.status==='校验通过，点击保存',4000);
+  assert.equal(job.received,bytes.size);
+  assert.equal(job.recovering,false);
+  assert.equal(t.receiver.savedBlobs.length,1);
+  assert.equal(await realSha256Hex(t.receiver.savedBlobs[0]),await realSha256Hex(bytes));
+  assert.equal(t.receiver.state.jobs.length,1,'old job is reused, never duplicated');
+});
+
+test('T03: a newly created same-code room does not revive an absent remote sender', async () => {
+  const t=harness();
+  t.run('connect({type:"enter",code:"5832",name:"Amber Fox"})');
+  await join(t,t.FakeWebSocket.sockets[0]);
+  const job={peerId:'old-sender',offerId:'offer-a',fileId:'file-a',name:'gone.bin',
+    size:5,received:2,chunks:[new Uint8Array([1,2])],status:'传输中',
+    cancelled:false,url:null};
+  t.state.jobs.push(job);
+  t.state.active=job;
+  t.FakeWebSocket.sockets[0].close();
+  assert.equal(job.recovering,true);
+  fireNextTimer(t);
+  t.FakeWebSocket.sockets.at(-1).open();
+  await t.run('handleServer({type:"welcome",code:"5832",id:"new-id",token:"new-token",generation:"new-gen",name:"Amber Fox",peers:[],created:true})');
+  assert.equal(job.recovering,false);
+  assert.match(job.status,/失败：原房间已关闭/);
+});
