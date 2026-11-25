@@ -1524,13 +1524,25 @@ async function receiveChannel(peer, data) {
   } else if (msg.kind === 'file-end') {
     const job = state.active;
     if (!job || job.peerId !== peer.id || job.fileId !== msg.fileId ||
-        job.offerId !== msg.offerId) return;
+        job.offerId !== msg.offerId) {
+      countTransfer(peer, 'end-ignored');
+      return;
+    }
     // The sender may have completed before it received cancel-file. With an
     // ordered DataChannel, file-end safely terminates that cancelled stream.
     if (job.cancelled) { finishJob('已取消'); return; }
-    if (job.status !== '传输中') return;
-    if (job.received !== job.size) { failActive('文件大小不匹配'); return; }
-    if (!isSha256Hex(msg.sha256)) { failActive('发送端缺少有效校验值，请双方刷新后重试'); return; }
+    if (job.status !== '传输中') {
+      countTransfer(peer, 'end-ignored');
+      return;
+    }
+    if (job.received !== job.size) {
+      countTransfer(peer, 'end-size-mismatch');
+      failActive('文件大小不匹配'); return;
+    }
+    if (!isSha256Hex(msg.sha256)) {
+      countTransfer(peer, 'end-invalid-digest');
+      failActive('发送端缺少有效校验值，请双方刷新后重试'); return;
+    }
     job.status = '校验中';
     armJobTimer(job, TRANSFER_IDLE_MS, '文件校验超时');
     renderRoomFiles();
@@ -1538,14 +1550,21 @@ async function receiveChannel(peer, data) {
       const blob = new Blob(job.chunks);
       const verified = await verifySha256(blob, msg.sha256);
       if (state.active !== job || job.cancelled) return;
-      if (!verified) { failActive('文件 SHA-256 校验失败，已丢弃数据'); return; }
+      if (!verified) {
+        countTransfer(peer, 'end-checksum-mismatch');
+        failActive('文件 SHA-256 校验失败，已丢弃数据'); return;
+      }
       job.blob = blob;
       job.url = URL.createObjectURL(blob);
       job.chunks = [];
       broadcastRoomHandoff();
+      countTransfer(peer, 'end-verified');
       finishJob('校验通过，点击保存');
     } catch (err) {
-      if (state.active === job) failActive(`文件校验失败：${err.message}`);
+      if (state.active === job) {
+        countTransfer(peer, 'end-checksum-error');
+        failActive(`文件校验失败：${err.message}`);
+      }
     }
   } else if (msg.kind === 'file-canceled') {
     const job = state.active;
@@ -1562,7 +1581,10 @@ async function receiveChannel(peer, data) {
 }
 function handleBinary(peer, data) {
   const job = state.active;
-  if (!peer.ready || !job || job.peerId !== peer.id || job.status !== '传输中' || !(data instanceof ArrayBuffer)) return;
+  if (!peer.ready || !job || job.peerId !== peer.id || job.status !== '传输中' || !(data instanceof ArrayBuffer)) {
+    if (data instanceof ArrayBuffer) countTransfer(peer, 'binary-ignored');
+    return;
+  }
   if (data.byteLength > CHUNK_SIZE || job.received + data.byteLength > job.size) { failActive('数据块超过允许大小'); return; }
   if (!job.cancelled) job.chunks.push(data);
   if (QA_MODE && data.byteLength > 0) {
@@ -2155,6 +2177,35 @@ function renderPeers() {
   renderSentFiles();
   qaRender();
 }
+// Ordinary diagnostics never echo a sender-supplied error string or file
+// metadata. Use fixed codes to distinguish post-file-end failure stages.
+function receiveFailureCode(job) {
+  const status = String(job.status || '');
+  if (!status.startsWith('失败')) return null;
+  if (status.includes('文件大小不匹配')) return 'size-mismatch';
+  if (status.includes('文件 SHA-256 校验失败')) return 'checksum-mismatch';
+  if (status.includes('发送端缺少有效校验值')) return 'invalid-digest';
+  if (status.includes('文件校验超时')) return 'checksum-timeout';
+  if (status.includes('文件校验失败')) return 'checksum-error';
+  if (status.includes('传输停滞超时')) return 'transfer-timeout';
+  if (status.includes('等待发送端超时')) return 'sender-timeout';
+  if (status.includes('上一笔传输尚未结束')) return 'sender-busy';
+  return 'other-failure';
+}
+function receiveJobOutcome(job) {
+  const status = String(job.status || '');
+  const failure = receiveFailureCode(job);
+  return {
+    phase: job.url ? 'verified' : failure ? 'failed'
+      : job.cancelled ? 'cancelled' : job.recovering ? 'recovering'
+      : status === '校验中' ? 'checking'
+      : status === '传输中' ? 'receiving' : 'waiting',
+    failure,
+    receivedAllBytes: job.received === job.size,
+    saveReady: Boolean(job.url),
+    autoRetries: job.handoffRetryCount || 0,
+  };
+}
 function diagnosticsSnapshot() {
   if (mirroredRoom?.view?.diagnostics) {
     return mirrorActionsUnavailable()
@@ -2175,6 +2226,10 @@ function diagnosticsSnapshot() {
     roomEntry: state.lastRoomEntry,
     localSharedFiles: state.ownOffers.reduce((n, offer) => n + offer.files.length, 0),
     visibleRemoteFiles: [...state.offers.values()].reduce((n, offer) => n + offer.files.length, 0),
+    receive: {
+      totalJobs: state.jobs.length,
+      recent: state.jobs.slice(-3).map(receiveJobOutcome),
+    },
     ...(QA_MODE ? { qa: {
       enabled: true, armed: Boolean(qaArmed), countdownPending: qaTimer !== null,
       triggered: qaTriggerAt !== null, lastOutcome: qaLastOutcome,
@@ -2254,6 +2309,13 @@ function diagnosticsSnapshot() {
         catalogRequestsReceived: peer.transferEvents?.['file-list-request:received'] || 0,
         ignoredStarts: peer.transferEvents?.['start-ignored-mismatch'] || 0,
         ignoredErrors: peer.transferEvents?.['error-ignored-mismatch'] || 0,
+        endsReceived: peer.transferEvents?.['file-end:received'] || 0,
+        endsIgnored: peer.transferEvents?.['end-ignored'] || 0,
+        endsSizeMismatch: peer.transferEvents?.['end-size-mismatch'] || 0,
+        endsChecksumMismatch: peer.transferEvents?.['end-checksum-mismatch'] || 0,
+        endsVerified: peer.transferEvents?.['end-verified'] || 0,
+        endsChecksumError: peer.transferEvents?.['end-checksum-error'] || 0,
+        binaryIgnored: peer.transferEvents?.['binary-ignored'] || 0,
         lastEvent: peer.lastTransferEvent || 'none',
         activeReceiveStage: state.active?.peerId !== peer.id ? null
           : state.active.status === '等待发送端' ? 'awaiting-response'
